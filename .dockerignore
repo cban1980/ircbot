@@ -1,0 +1,10 @@
+# Keep configuration, data and secrets out of the image build context.
+config.yml
+data/
+secret/
+instance/
+testrun.*
+*.log
+.git/
+contrib/
+.gitignore

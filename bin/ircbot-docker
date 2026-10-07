@@ -1,0 +1,518 @@
+#!/usr/bin/env bash
+# Build, run and manage the IRC bot in a Docker container.
+#
+# Everything the bot needs at runtime lives in one host folder (the
+# "instance"), mounted at /bot in the container and editable on the host:
+#
+#   <instance>/config.yml   settings ("edit" or edit by hand, then "reload")
+#   <instance>/data/        accounts, channels, known servers, status
+#   <instance>/secret/      password pepper (back it up!)
+#
+# Moving to another server: "backup" here, copy the file and this repo
+# over, then "restore FILE" and "start" there.
+set -euo pipefail
+
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+PROG=$(basename "$0")
+DIR=${IRCBOT_DIR:-$REPO/instance}
+NAME=${IRCBOT_NAME:-ircbot}
+IMAGE=${IRCBOT_IMAGE:-ircbot:latest}
+
+usage() {
+  cat <<EOF
+Usage: $PROG [global options] <command> [options]
+
+Global options:
+  -d, --dir DIR       instance folder        (default: \$IRCBOT_DIR or <repo>/instance)
+  -n, --name NAME     container name         (default: \$IRCBOT_NAME or ircbot)
+  -i, --image IMAGE   image tag              (default: \$IRCBOT_IMAGE or ircbot:latest)
+  -h, --help          show this help
+
+Setup:
+  init [--empty]            create the instance folder; copies config.yml, data/ and
+                            secret/ from the repo if present (--empty: example config)
+  build [--no-cache]        pull debian:trixie-slim and build the image
+  check                     validate config.yml, data and pepper without touching the bot
+  test                      run the test suite in a trixie container
+
+Running:
+  start [options]           start the bot (builds the image if missing)
+      --debug               log level debug (logs raw IRC traffic, passwords redacted)
+      --log-level LEVEL     debug, info, warn or error (default: info)
+      --foreground          run attached in this terminal; Ctrl-C stops it
+      --rebuild             rebuild the image first
+      --restart-policy P    docker restart policy (default: unless-stopped)
+      --memory SIZE         memory limit (default: 256m)
+  stop [--timeout N]        quit IRC cleanly and remove the container
+  restart [--rebuild] [start options]
+                            check the config, then stop and start
+  reload                    apply config.yml and data changes live, without
+                            reconnecting (unless connection settings changed)
+  reconnect                 drop the IRC connection and reconnect
+  update [--no-restart]     rebuild on the latest base image, restart if running
+
+Inspecting:
+  status [--json]           container state, health, server, nick and channels
+  logs [-f] [-n N] [--since TIME]
+                            show the log (-f follow, -n last N lines)
+  shell                     shell in a throwaway container with the same mounts
+
+Accounts and channels (work while the bot runs):
+  account list
+  account register|passwd|delete NICK     password prompts are hidden
+  channel list
+  channel show #CHAN
+  channel register #CHAN OWNER            the bot joins after an automatic reload
+  channel drop #CHAN                      the bot leaves after an automatic reload
+  channel mask-add #CHAN MASK voice|op    auto-mode on join for nick!user@host
+                                          (exact host, e.g. '*!*me@home.example.net')
+  channel mask-del #CHAN MASK
+
+Configuration:
+  edit                      open config.yml in \$EDITOR, check it, reload if running
+
+Backup and migration:
+  backup [FILE]             archive config.yml, data/ and secret/ (contains the
+                            pepper and password hashes: keep it private)
+  restore FILE [--force]    unpack a backup into the instance folder
+  clean [--images]          remove the container (and the images)
+
+Instance folder: $DIR
+EOF
+}
+
+die() { echo "$PROG: $*" >&2; exit 1; }
+info() { echo "==> $*"; }
+
+[ "$(id -u)" -ne 0 ] || die "run this as your normal user (in the docker group), not as root"
+
+# --- global options ----------------------------------------------------------
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -d|--dir) [ $# -ge 2 ] || die "$1 needs a value"; DIR=$2; shift 2 ;;
+    -n|--name) [ $# -ge 2 ] || die "$1 needs a value"; NAME=$2; shift 2 ;;
+    -i|--image) [ $# -ge 2 ] || die "$1 needs a value"; IMAGE=$2; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    -*) die "unknown option $1 (see $PROG --help)" ;;
+    *) break ;;
+  esac
+done
+case "$DIR" in /*) ;; *) DIR=$(pwd)/$DIR ;; esac
+TEST_IMAGE=${IMAGE%:*}:test
+STATUS_FILE=$DIR/data/status.json
+
+# --- helpers -------------------------------------------------------------------
+
+require_docker() {
+  command -v docker >/dev/null || die "docker is not installed"
+  docker info >/dev/null 2>&1 || die "cannot reach Docker; is the service running and are you in the docker group?"
+}
+
+require_instance() {
+  [ -f "$DIR/config.yml" ] || die "no config at $DIR/config.yml; run: $PROG init"
+}
+
+container_state() {
+  # Some Docker versions print an empty line before failing for a missing
+  # container, so only trust the output when inspect succeeds.
+  local state
+  if state=$(docker container inspect --format '{{.State.Status}}' "$NAME" 2>/dev/null) && [ -n "$state" ]; then
+    echo "$state"
+  else
+    echo "absent"
+  fi
+}
+
+remove_container() {
+  docker rm "$NAME" >/dev/null 2>&1 || true
+}
+
+is_running() { [ "$(container_state)" = "running" ]; }
+
+require_running() {
+  is_running || die "$NAME is not running (start it with: $PROG start)"
+}
+
+ensure_image() {
+  docker image inspect "$IMAGE" >/dev/null 2>&1 || cmd_build
+}
+
+# Hardened options for every container that touches the instance folder.
+# It runs as your user, so files in the instance folder stay yours.
+base_run_opts() {
+  run_opts=(
+    --user "$(id -u):$(id -g)"
+    --volume "$DIR:/bot"
+    --read-only
+    --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m
+    --cap-drop ALL
+    --security-opt no-new-privileges
+    --pids-limit 64
+    --init
+  )
+}
+
+# Runs a one-off command from the image with the instance mounted.
+run_tool() {
+  local tty=()
+  [ -t 0 ] && [ -t 1 ] && tty=(--interactive --tty)
+  base_run_opts
+  docker run --rm "${tty[@]}" "${run_opts[@]}" --memory 256m --entrypoint ruby "$IMAGE" "$@"
+}
+
+# Shows the bot's log lines since a timestamp, e.g. the result of a reload.
+show_log_since() {
+  local since=$1 wait_for=${2:-2}
+  sleep "$wait_for"
+  docker logs --since "$since" "$NAME" 2>&1 | sed 's/^/    /'
+}
+
+now_rfc3339() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# --- commands ----------------------------------------------------------------
+
+cmd_init() {
+  local empty=false
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --empty) empty=true; shift ;;
+      *) die "init: unknown option $1" ;;
+    esac
+  done
+  if [ -f "$DIR/config.yml" ]; then
+    echo "$DIR already has a config.yml; leaving it alone."
+    return
+  fi
+  mkdir -p "$DIR"
+  if ! $empty && [ -f "$REPO/config.yml" ] && [ "$DIR" != "$REPO" ]; then
+    cp -a "$REPO/config.yml" "$DIR/"
+    for sub in data secret; do
+      [ -d "$REPO/$sub" ] && cp -a "$REPO/$sub" "$DIR/"
+    done
+    rm -f "$DIR/data/status.json"
+    info "Copied config.yml, data/ and secret/ from $REPO into $DIR"
+  else
+    cp "$REPO/config.example.yml" "$DIR/config.yml"
+    info "Created $DIR/config.yml from the example; edit it before starting ($PROG edit)"
+  fi
+  mkdir -p "$DIR/data" "$DIR/secret"
+  chmod -R go-rwx "$DIR" # everything private to you, copied files included
+  echo "Next: $PROG account register <yournick>   (if you have no account yet)"
+  echo "      $PROG start"
+}
+
+cmd_build() {
+  local opts=(--pull)
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --no-cache) opts+=(--no-cache); shift ;;
+      *) die "build: unknown option $1" ;;
+    esac
+  done
+  info "Building $IMAGE (debian:trixie-slim, Ruby 3.3)"
+  docker build "${opts[@]}" --target runtime --tag "$IMAGE" "$REPO"
+}
+
+cmd_check() {
+  require_instance
+  ensure_image
+  run_tool /app/bin/ircbot --check /bot/config.yml
+}
+
+cmd_start() {
+  local log_level=${IRCBOT_LOG_LEVEL:-info} foreground=false rebuild=false
+  local policy=unless-stopped memory=256m
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --debug) log_level=debug; shift ;;
+      --log-level) [ $# -ge 2 ] || die "--log-level needs a value"; log_level=$2; shift 2 ;;
+      --foreground) foreground=true; shift ;;
+      --rebuild) rebuild=true; shift ;;
+      --restart-policy) [ $# -ge 2 ] || die "--restart-policy needs a value"; policy=$2; shift 2 ;;
+      --memory) [ $# -ge 2 ] || die "--memory needs a value"; memory=$2; shift 2 ;;
+      *) die "start: unknown option $1" ;;
+    esac
+  done
+  case "$log_level" in debug|info|warn|error) ;; *) die "unknown log level $log_level" ;; esac
+  require_instance
+  if $rebuild; then cmd_build; else ensure_image; fi
+
+  case "$(container_state)" in
+    running) echo "$NAME is already running (use: $PROG restart)"; return ;;
+    absent) ;;
+    *) remove_container ;;
+  esac
+  cmd_check >/dev/null || die "config check failed; fix it first (details: $PROG check)"
+
+  base_run_opts
+  run_opts+=(
+    --name "$NAME"
+    --memory "$memory"
+    --env IRCBOT_LOG_LEVEL="$log_level"
+    --label "ircbot.instance=$DIR"
+  )
+  if $foreground; then
+    info "Starting $NAME in the foreground (Ctrl-C stops it)"
+    exec docker run --rm --interactive --tty "${run_opts[@]}" "$IMAGE" /bot/config.yml
+  fi
+
+  local since
+  since=$(now_rfc3339)
+  docker run --detach --restart "$policy" \
+    --log-driver json-file --log-opt max-size=10m --log-opt max-file=3 \
+    "${run_opts[@]}" "$IMAGE" /bot/config.yml >/dev/null
+  info "Started $NAME (log level $log_level, restart policy $policy)"
+  show_log_since "$since" 4
+  is_running || die "$NAME stopped right away; see the log above"
+}
+
+cmd_stop() {
+  local timeout=15
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --timeout) [ $# -ge 2 ] || die "--timeout needs a value"; timeout=$2; shift 2 ;;
+      *) die "stop: unknown option $1" ;;
+    esac
+  done
+  case "$(container_state)" in
+    absent) echo "$NAME is not running."; return ;;
+    running) docker stop --time "$timeout" "$NAME" >/dev/null ;;
+  esac
+  remove_container
+  info "Stopped $NAME"
+}
+
+cmd_restart() {
+  local start_args=() rebuild=false
+  for arg in "$@"; do
+    if [ "$arg" = "--rebuild" ]; then rebuild=true; else start_args+=("$arg"); fi
+  done
+  require_instance
+  $rebuild && cmd_build
+  ensure_image
+  # Check before stopping, so a broken config doesn't take the bot down.
+  cmd_check >/dev/null || die "config check failed; the bot keeps running (details: $PROG check)"
+  cmd_stop
+  cmd_start "${start_args[@]}"
+}
+
+cmd_reload() {
+  require_running
+  cmd_check >/dev/null || die "config check failed; nothing reloaded (details: $PROG check)"
+  local since
+  since=$(now_rfc3339)
+  docker kill --signal HUP "$NAME" >/dev/null
+  info "Sent reload to $NAME:"
+  show_log_since "$since" 2
+}
+
+cmd_reconnect() {
+  require_running
+  local since
+  since=$(now_rfc3339)
+  docker kill --signal USR1 "$NAME" >/dev/null
+  info "Sent reconnect to $NAME:"
+  show_log_since "$since" 5
+}
+
+cmd_status() {
+  local json=false
+  [ "${1:-}" = "--json" ] && json=true
+  if $json; then
+    [ -f "$STATUS_FILE" ] || die "no status file yet ($STATUS_FILE)"
+    cat "$STATUS_FILE"
+    return
+  fi
+  local state health=""
+  state=$(container_state)
+  if [ "$state" != "absent" ]; then
+    health=$(docker container inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$NAME")
+  fi
+  echo "Container: $NAME  ($state${health:+, $health})"
+  echo "Image:     $IMAGE"
+  echo "Instance:  $DIR"
+  [ -f "$STATUS_FILE" ] || { echo "Bot:       no status yet"; return; }
+  local ruby_cmd='
+    s = JSON.parse(File.read("/bot/data/status.json"))
+    age = Time.now.to_i - s["updated_at_unix"].to_i
+    puts "Bot:       #{s["state"]} (updated #{age}s ago)"
+    puts "Server:    #{s["server"]}:#{s["port"]}#{" (#{s["network"]})" if s["network"]}"
+    puts "Nick:      #{s["nick"]}"
+    puts "Channels:  #{s["channels"].empty? ? "none" : s["channels"].join(" ")}"
+    puts "Since:     #{s["connected_since"] || "-"}"'
+  if is_running; then
+    docker exec "$NAME" ruby -rjson -e "$ruby_cmd"
+  else
+    ensure_image
+    run_tool -rjson -e "$ruby_cmd"
+  fi
+}
+
+cmd_logs() {
+  [ "$(container_state)" != "absent" ] || die "$NAME does not exist (start it with: $PROG start)"
+  local opts=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -f|--follow) opts+=(--follow); shift ;;
+      -n|--tail) [ $# -ge 2 ] || die "$1 needs a value"; opts+=(--tail "$2"); shift 2 ;;
+      --since) [ $# -ge 2 ] || die "--since needs a value"; opts+=(--since "$2"); shift 2 ;;
+      *) die "logs: unknown option $1" ;;
+    esac
+  done
+  docker logs "${opts[@]}" "$NAME"
+}
+
+cmd_account() {
+  [ $# -gt 0 ] || die "usage: $PROG account list | register|passwd|delete NICK"
+  case "$1" in
+    list) [ $# -eq 1 ] || die "usage: $PROG account list" ;;
+    register|passwd|delete) [ $# -eq 2 ] || die "usage: $PROG account $1 NICK" ;;
+    *) die "unknown account command $1" ;;
+  esac
+  require_instance
+  ensure_image
+  run_tool /app/bin/ircbot-account --config /bot/config.yml "$@"
+}
+
+cmd_channel() {
+  [ $# -gt 0 ] || die "usage: $PROG channel list | show #CHAN | register #CHAN OWNER | drop #CHAN | mask-add #CHAN MASK LEVEL | mask-del #CHAN MASK"
+  local action=$1 tool_cmd
+  shift
+  case "$action" in
+    list) [ $# -eq 0 ] || die "usage: $PROG channel list"; tool_cmd=channels ;;
+    show) [ $# -eq 1 ] || die "usage: $PROG channel show #CHAN"; tool_cmd=channel-show ;;
+    register) [ $# -eq 2 ] || die "usage: $PROG channel register #CHAN OWNER"; tool_cmd=channel-register ;;
+    drop) [ $# -eq 1 ] || die "usage: $PROG channel drop #CHAN"; tool_cmd=channel-drop ;;
+    mask-add) [ $# -eq 3 ] || die "usage: $PROG channel mask-add #CHAN MASK voice|op"; tool_cmd=channel-mask-add ;;
+    mask-del) [ $# -eq 2 ] || die "usage: $PROG channel mask-del #CHAN MASK"; tool_cmd=channel-mask-del ;;
+    *) die "unknown channel command $action" ;;
+  esac
+  require_instance
+  ensure_image
+  run_tool /app/bin/ircbot-account --config /bot/config.yml "$tool_cmd" "$@"
+  if [[ "$action" =~ ^(register|drop)$ ]] && is_running; then
+    cmd_reload
+  fi
+}
+
+cmd_edit() {
+  require_instance
+  "${VISUAL:-${EDITOR:-vi}}" "$DIR/config.yml"
+  ensure_image
+  if ! cmd_check; then
+    die "config.yml has problems (shown above); nothing applied. Run '$PROG edit' again to fix it."
+  fi
+  if is_running; then cmd_reload; fi
+}
+
+cmd_backup() {
+  require_instance
+  local file=${1:-ircbot-backup-$(date +%Y%m%d-%H%M%S).tar.gz}
+  case "$file" in /*) ;; *) file=$(pwd)/$file ;; esac
+  [ ! -e "$file" ] || die "$file already exists"
+  (
+    umask 077
+    tar -C "$DIR" --exclude='*.tmp' --exclude='*.lock' --exclude='data/status.json' \
+      -czf "$file" config.yml data secret
+  )
+  info "Backup written to $file"
+  echo "It contains the password pepper and hashes: keep it private."
+}
+
+cmd_restore() {
+  local file="" force=false
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --force) force=true; shift ;;
+      -*) die "restore: unknown option $1" ;;
+      *) [ -z "$file" ] || die "restore takes one file"; file=$1; shift ;;
+    esac
+  done
+  [ -n "$file" ] || die "usage: $PROG restore FILE [--force]"
+  [ -f "$file" ] || die "$file not found"
+  if [ "$(container_state)" = "running" ]; then die "stop $NAME first ($PROG stop)"; fi
+  if [ -f "$DIR/config.yml" ] && ! $force; then
+    die "$DIR already has a config.yml; use --force to overwrite it"
+  fi
+  # Only accept the expected, relative paths (no absolute paths or "..").
+  local entry
+  while IFS= read -r entry; do
+    case "$entry" in
+      config.yml|data|data/*|secret|secret/*) ;;
+      *) die "unexpected entry in backup: $entry" ;;
+    esac
+    case "$entry" in *..*) die "unsafe path in backup: $entry" ;; esac
+  done < <(tar -tzf "$file")
+  mkdir -p "$DIR"
+  tar -C "$DIR" --no-same-owner --no-same-permissions -xzf "$file"
+  chmod -R go-rwx "$DIR"
+  info "Restored $file into $DIR"
+  echo "Next: $PROG check && $PROG start"
+}
+
+cmd_test() {
+  info "Building the test image (debian:trixie-slim, Ruby 3.3)"
+  docker build --pull --target test --tag "$TEST_IMAGE" "$REPO"
+  docker run --rm --user "$(id -u):$(id -g)" --read-only \
+    --tmpfs /tmp:rw,nosuid,nodev,size=64m --cap-drop ALL --security-opt no-new-privileges \
+    "$TEST_IMAGE" sh -c 'ruby --version && rake test'
+}
+
+cmd_update() {
+  local restart=true
+  [ "${1:-}" = "--no-restart" ] && restart=false
+  cmd_build
+  if $restart && is_running; then
+    cmd_restart
+  fi
+}
+
+cmd_shell() {
+  require_instance
+  ensure_image
+  base_run_opts
+  docker run --rm --interactive --tty "${run_opts[@]}" --memory 256m --entrypoint sh "$IMAGE"
+}
+
+cmd_clean() {
+  cmd_stop
+  if [ "${1:-}" = "--images" ]; then
+    docker image rm "$IMAGE" "$TEST_IMAGE" 2>/dev/null || true
+    info "Removed images $IMAGE and $TEST_IMAGE"
+  fi
+}
+
+# --- dispatch ------------------------------------------------------------------
+
+command=${1:-help}
+[ $# -eq 0 ] || shift
+case "$command" in
+  init|help|backup|restore) ;;
+  build|check|start|stop|restart|reload|reconnect|status|logs|account|channel|edit|test|update|shell|clean)
+    require_docker ;;
+  *) echo "$PROG: unknown command '$command'" >&2; usage >&2; exit 1 ;;
+esac
+case "$command" in
+  init) cmd_init "$@" ;;
+  build) cmd_build "$@" ;;
+  check) cmd_check ;;
+  start) cmd_start "$@" ;;
+  stop) cmd_stop "$@" ;;
+  restart) cmd_restart "$@" ;;
+  reload) cmd_reload ;;
+  reconnect) cmd_reconnect ;;
+  status) cmd_status "$@" ;;
+  logs) cmd_logs "$@" ;;
+  account) cmd_account "$@" ;;
+  channel) cmd_channel "$@" ;;
+  edit) cmd_edit ;;
+  backup) cmd_backup "$@" ;;
+  restore) cmd_restore "$@" ;;
+  test) cmd_test ;;
+  update) cmd_update "$@" ;;
+  shell) cmd_shell ;;
+  clean) cmd_clean "$@" ;;
+  help) usage ;;
+  *) usage >&2; exit 1 ;;
+esac

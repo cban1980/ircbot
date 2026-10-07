@@ -1,0 +1,81 @@
+# Copy to config.yml and adjust.
+
+# An IRCnet server with a TLS port (see the server list on ircnet.com).
+server: irc.example.net
+port: 6697
+
+# --- Transport security --------------------------------------------------
+# TLS with certificate + hostname verification against the system CA store.
+tls: true
+tls_verify: true
+# Oldest TLS version accepted: "1.2" or "1.3".
+tls_min_version: "1.2"
+# Optional: pin the server's public key (SHA-256 of its SubjectPublicKeyInfo).
+# The connection then fails if the key ever changes. Pinning also lets you
+# set tls_verify: false for servers with self-signed certificates. Get it with:
+#   openssl s_client -connect HOST:PORT </dev/null 2>/dev/null \
+#     | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der | sha256sum
+tls_fingerprint:
+# Required to run without TLS or with unverified, unpinned TLS. Don't.
+allow_insecure: false
+
+# Only accept REGISTER/IDENTIFY/PASSWORD from users whose own connection to
+# IRC uses TLS (checked via WHOIS; IRCnet servers 2.11.3+ report this).
+require_secure_users: true
+
+# --- Identity --------------------------------------------------------------
+# The nick the bot wants. IRCnet limits nicks to 9 characters. If it is
+# taken, the bot uses alt_nicks (in order), then a numbered variant, and
+# keeps trying to win the primary nick back.
+nick: ModeBot
+alt_nicks:
+  - ModeBot_
+  - ModeBot2
+
+# Username (ident) shown as user@host. Without an identd running, IRCnet
+# shows it with a "~" prefix.
+user: modebot
+
+# Real name shown in WHOIS.
+realname: Ruby IRC registration bot
+
+# User modes the bot sets on itself after connecting. Empty for none.
+# IRCnet: i = invisible (hidden from WHO/NAMES of users outside its
+# channels), w = receive wallops.
+umodes: "+i"
+
+# --- Storage ---------------------------------------------------------------
+# Relative paths are resolved against this file's directory.
+data_file: data/ircbot.json
+
+# Secret key mixed into every password hash; generated on first start.
+# Keep it apart from data backups. Losing it makes every account unusable.
+# IRCBOT_PEPPER (64+ hex chars) in the environment overrides this file.
+pepper_file: secret/pepper.key
+
+# --- Access ----------------------------------------------------------------
+# Bot accounts (registered with the bot via REGISTER) that can register
+# channels and act as owner everywhere. Register these accounts yourself
+# right after first start, before anyone else can claim the names.
+admins:
+  - andreas
+
+# Channels to always join, registered or not. Registered channels are
+# joined automatically.
+channels:
+  +
+  - "#mychannel"
+
+# --- Link previews ---------------------------------------------------------
+# Links posted in channels get a one-line notice: YouTube title/channel
+# (plus duration and views with an API key), web page titles, or the
+# content type and size for other files.
+link_preview:
+  enabled: true
+  # Limit to these channels; empty means every channel the bot is in.
+  channels: []
+  # Never preview links from these nicks (e.g. other bots).
+  ignore_nicks: []
+  # Optional YouTube Data API v3 key, for duration and view counts.
+  # Prefer IRCBOT_YOUTUBE_API_KEY in the environment.
+  youtube_api_key:
