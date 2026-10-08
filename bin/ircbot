@@ -34,6 +34,11 @@ begin
     puts "  admins:   #{config['admins'].join(', ').then { |s| s.empty? ? 'none' : s }}"
     puts "  channels: #{(config['channels'] + channels.names).uniq.join(' ').then { |s| s.empty? ? 'none' : s }}"
     puts "  accounts: #{accounts.names.size}"
+    # Plugin problems are reported but don't fail the check: the bot runs
+    # without a broken plugin.
+    plugins = IRCBot::PluginManager.check(config["plugins_dir"], config["plugins"])
+    puts "  plugins:  #{plugins.empty? ? "none in #{config['plugins_dir']}" : plugins.keys.join(' ')}"
+    plugins.each { |name, problem| puts "    #{name}: #{problem}" if problem }
     exit 0
   end
 

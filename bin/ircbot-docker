@@ -7,6 +7,7 @@
 #   <instance>/config.yml   settings ("edit" or edit by hand, then "reload")
 #   <instance>/data/        accounts, channels, known servers, status
 #   <instance>/secret/      password pepper (back it up!)
+#   <instance>/plugins/     plugin files (*.rb), loaded live on "reload"
 #
 # Moving to another server: "backup" here, copy the file and this repo
 # over, then "restore FILE" and "start" there.
@@ -17,6 +18,7 @@ PROG=$(basename "$0")
 DIR=${IRCBOT_DIR:-$REPO/instance}
 NAME=${IRCBOT_NAME:-ircbot}
 IMAGE=${IRCBOT_IMAGE:-ircbot:latest}
+BRANCH=${IRCBOT_BRANCH:-main}
 
 usage() {
   cat <<EOF
@@ -49,7 +51,15 @@ Running:
   reload                    apply config.yml and data changes live, without
                             reconnecting (unless connection settings changed)
   reconnect                 drop the IRC connection and reconnect
-  update [--no-restart]     rebuild on the latest base image, restart if running
+  plugin list               loaded plugins, their commands and load errors
+  plugin install FILE.rb    copy a plugin into the instance (private permissions)
+                            and load it if the bot is running
+  plugin remove NAME        delete a plugin file and unload it if running
+  plugin reload             load new plugin files, reload changed ones and
+                            re-read config.yml (same as reload)
+  update [--no-pull] [--no-restart]
+                            pull \$IRCBOT_BRANCH (default: main) from origin, rebuild on
+                            the latest base image, restart if running
 
 Inspecting:
   status [--json]           container state, health, server, nick and channels
@@ -72,7 +82,7 @@ Configuration:
   edit                      open config.yml in \$EDITOR, check it, reload if running
 
 Backup and migration:
-  backup [FILE]             archive config.yml, data/ and secret/ (contains the
+  backup [FILE]             archive config.yml, data/, secret/ and plugins/ (contains the
                             pepper and password hashes: keep it private)
   restore FILE [--force]    unpack a backup into the instance folder
   clean [--images]          remove the container (and the images)
@@ -170,6 +180,30 @@ show_log_since() {
 
 now_rfc3339() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
+# Fast-forwards the repo to origin/$BRANCH; sets pulled=true if HEAD moved.
+# Config, data and secrets are gitignored, so they are never touched.
+pull_repo() {
+  command -v git >/dev/null || die "git is not installed"
+  git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    || die "$REPO is not a git checkout; clone the repo there (or pass --no-pull)"
+  local branch before after
+  branch=$(git -C "$REPO" symbolic-ref --quiet --short HEAD) || die "$REPO is not on a branch; check out $BRANCH first"
+  [ "$branch" = "$BRANCH" ] || die "$REPO is on branch $branch, not $BRANCH; check out $BRANCH first (or pass --no-pull)"
+  [ -z "$(git -C "$REPO" status --porcelain --untracked-files=no)" ] \
+    || die "$REPO has uncommitted changes; commit or stash them first (or pass --no-pull)"
+  before=$(git -C "$REPO" rev-parse HEAD)
+  info "Pulling $BRANCH from origin"
+  git -C "$REPO" pull --ff-only --quiet origin "$BRANCH" || die "pull failed; nothing rebuilt"
+  after=$(git -C "$REPO" rev-parse HEAD)
+  if [ "$before" = "$after" ]; then
+    pulled=false
+    echo "    already up to date ($(git -C "$REPO" log -1 --format='%h %s'))"
+  else
+    pulled=true
+    git -C "$REPO" log --oneline "$before..$after" | sed 's/^/    /'
+  fi
+}
+
 # --- commands ----------------------------------------------------------------
 
 cmd_init() {
@@ -196,7 +230,7 @@ cmd_init() {
     cp "$REPO/config.example.yml" "$DIR/config.yml"
     info "Created $DIR/config.yml from the example; edit it before starting ($PROG edit)"
   fi
-  mkdir -p "$DIR/data" "$DIR/secret"
+  mkdir -p "$DIR/data" "$DIR/secret" "$DIR/plugins"
   chmod -R go-rwx "$DIR" # everything private to you, copied files included
   echo "Next: $PROG account register <yournick>   (if you have no account yet)"
   echo "      $PROG start"
@@ -340,7 +374,9 @@ cmd_status() {
     puts "Server:    #{s["server"]}:#{s["port"]}#{" (#{s["network"]})" if s["network"]}"
     puts "Nick:      #{s["nick"]}"
     puts "Channels:  #{s["channels"].empty? ? "none" : s["channels"].join(" ")}"
-    puts "Since:     #{s["connected_since"] || "-"}"'
+    puts "Since:     #{s["connected_since"] || "-"}"
+    plugins = (s["plugins"] || {}).map { |name, p| p["state"] == "loaded" ? name : "#{name} (#{p["state"]})" }
+    puts "Plugins:   #{plugins.empty? ? "none" : plugins.join(" ")}"'
   if is_running; then
     docker exec "$NAME" ruby -rjson -e "$ruby_cmd"
   else
@@ -396,6 +432,59 @@ cmd_channel() {
   fi
 }
 
+cmd_plugin() {
+  local usage="usage: $PROG plugin list | install FILE.rb | remove NAME | reload"
+  case "${1:-}" in
+    list) [ $# -eq 1 ] || die "$usage" ;;
+    install) [ $# -eq 2 ] || die "$usage"; plugin_install "$2"; return ;;
+    remove) [ $# -eq 2 ] || die "$usage"; plugin_remove "$2"; return ;;
+    reload) [ $# -eq 1 ] || die "$usage"; cmd_reload; return ;;
+    *) die "$usage" ;;
+  esac
+  [ -f "$STATUS_FILE" ] || die "no status file yet ($STATUS_FILE); is the bot running?"
+  local ruby_cmd='
+    plugins = JSON.parse(File.read("/bot/data/status.json"))["plugins"] || {}
+    puts "No plugins (put *.rb files in plugins/ and reload)" if plugins.empty?
+    plugins.each do |name, p|
+      line = "#{name}: #{p["state"]}"
+      if p["state"] == "loaded"
+        where = [("/msg" if p["private"]), ("#{p["prefix"]} in channels" if p["prefix"])].compact
+        line += "  commands: #{p["commands"].empty? ? "-" : p["commands"].join(" ")}"
+        line += "  via: #{where.empty? ? "events only" : where.join(", ")}"
+      end
+      line += "\n    error: #{p["error"]}" if p["error"]
+      puts line
+    end'
+  if is_running; then
+    docker exec "$NAME" ruby -rjson -e "$ruby_cmd"
+  else
+    ensure_image
+    run_tool -rjson -e "$ruby_cmd"
+  fi
+}
+
+# The bot only loads plugin files that only you can write.
+plugin_install() {
+  local file=$1 name
+  name=$(basename "$file" .rb)
+  [ -f "$file" ] && [ "$file" != "$name" ] || die "$file is not a .rb file"
+  [[ "$name" =~ ^[a-z][a-z0-9_]{0,31}$ ]] || die "plugin file names are lowercase letters, digits and _ (got $name.rb)"
+  require_instance
+  mkdir -p "$DIR/plugins"
+  chmod 700 "$DIR/plugins"
+  install -m 600 "$file" "$DIR/plugins/$name.rb"
+  info "Installed $DIR/plugins/$name.rb"
+  if is_running; then cmd_reload; else echo "It loads when the bot starts."; fi
+}
+
+plugin_remove() {
+  local name=${1%.rb}
+  [ -f "$DIR/plugins/$name.rb" ] || die "no plugin $DIR/plugins/$name.rb"
+  rm -f "$DIR/plugins/$name.rb"
+  info "Removed $DIR/plugins/$name.rb"
+  if is_running; then cmd_reload; fi
+}
+
 cmd_edit() {
   require_instance
   "${VISUAL:-${EDITOR:-vi}}" "$DIR/config.yml"
@@ -408,13 +497,14 @@ cmd_edit() {
 
 cmd_backup() {
   require_instance
-  local file=${1:-ircbot-backup-$(date +%Y%m%d-%H%M%S).tar.gz}
+  local file=${1:-ircbot-backup-$(date +%Y%m%d-%H%M%S).tar.gz} parts=(config.yml data secret)
+  [ -d "$DIR/plugins" ] && parts+=(plugins)
   case "$file" in /*) ;; *) file=$(pwd)/$file ;; esac
   [ ! -e "$file" ] || die "$file already exists"
   (
     umask 077
     tar -C "$DIR" --exclude='*.tmp' --exclude='*.lock' --exclude='data/status.json' \
-      -czf "$file" config.yml data secret
+      -czf "$file" "${parts[@]}"
   )
   info "Backup written to $file"
   echo "It contains the password pepper and hashes: keep it private."
@@ -439,7 +529,7 @@ cmd_restore() {
   local entry
   while IFS= read -r entry; do
     case "$entry" in
-      config.yml|data|data/*|secret|secret/*) ;;
+      config.yml|data|data/*|secret|secret/*|plugins|plugins/*) ;;
       *) die "unexpected entry in backup: $entry" ;;
     esac
     case "$entry" in *..*) die "unsafe path in backup: $entry" ;; esac
@@ -460,8 +550,21 @@ cmd_test() {
 }
 
 cmd_update() {
-  local restart=true
-  [ "${1:-}" = "--no-restart" ] && restart=false
+  local restart=true pull=true pulled=false
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --no-restart) restart=false; shift ;;
+      --no-pull) pull=false; shift ;;
+      *) die "update: unknown option $1" ;;
+    esac
+  done
+  $pull && pull_repo
+  if $pulled; then
+    # The pull may have changed this script too; finish with the new version.
+    local again=(update --no-pull)
+    $restart || again+=(--no-restart)
+    exec "$REPO/bin/$PROG" --dir "$DIR" --name "$NAME" --image "$IMAGE" "${again[@]}"
+  fi
   cmd_build
   if $restart && is_running; then
     cmd_restart
@@ -489,7 +592,7 @@ command=${1:-help}
 [ $# -eq 0 ] || shift
 case "$command" in
   init|help|backup|restore) ;;
-  build|check|start|stop|restart|reload|reconnect|status|logs|account|channel|edit|test|update|shell|clean)
+  build|check|start|stop|restart|reload|reconnect|status|logs|account|channel|plugin|edit|test|update|shell|clean)
     require_docker ;;
   *) echo "$PROG: unknown command '$command'" >&2; usage >&2; exit 1 ;;
 esac
@@ -506,6 +609,7 @@ case "$command" in
   logs) cmd_logs "$@" ;;
   account) cmd_account "$@" ;;
   channel) cmd_channel "$@" ;;
+  plugin) cmd_plugin "$@" ;;
   edit) cmd_edit ;;
   backup) cmd_backup "$@" ;;
   restore) cmd_restore "$@" ;;

@@ -11,8 +11,10 @@ module IRCBot
   # - The directory must belong to us and not be writable by others; the
   #   data file must be a regular file we own. Symlinks are not followed.
   class Store
-    def initialize(path)
+    # sections: top-level keys that always exist (hashes).
+    def initialize(path, sections: %w[accounts channels])
       @path = path
+      @sections = sections
       @dir = File.dirname(path)
       @mutex = Mutex.new
       prepare_directory
@@ -51,8 +53,7 @@ module IRCBot
     def load
       @stamp = stamp
       data = @stamp ? JSON.parse(read_file) : {}
-      data["accounts"] ||= {}
-      data["channels"] ||= {}
+      @sections.each { |section| data[section] ||= {} }
       data
     end
 

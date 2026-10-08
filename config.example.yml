@@ -1,8 +1,10 @@
 # Copy to config.yml and adjust.
 
-# An IRCnet server with a TLS port (see the server list on ircnet.com).
+# An IRCnet server with a TLS port that accepts your IP address.
 server: irc.example.net
 port: 6697
+# Only join channels if the server confirms this network name.
+network: IRCnet
 
 # --- Transport security --------------------------------------------------
 # TLS with certificate + hostname verification against the system CA store.
@@ -16,6 +18,12 @@ tls_min_version: "1.2"
 #   openssl s_client -connect HOST:PORT </dev/null 2>/dev/null \
 #     | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der | sha256sum
 tls_fingerprint:
+# Accept servers with self-signed certificates, trusting them on first use
+# like SSH: the server's key is recorded in tls_known_servers the first
+# time, and a different key later is refused (possible man-in-the-middle).
+# Servers with valid CA-signed certificates are verified as usual.
+tls_self_signed: false
+tls_known_servers: data/known_servers
 # Required to run without TLS or with unverified, unpinned TLS. Don't.
 allow_insecure: false
 
@@ -63,15 +71,17 @@ admins:
 # Channels to always join, registered or not. Registered channels are
 # joined automatically.
 channels:
-  +
   - "#mychannel"
 
 # --- Link previews ---------------------------------------------------------
-# Links posted in channels get a one-line notice: YouTube title/channel
+# Links posted in channels get a one-line reply: YouTube title/channel
 # (plus duration and views with an API key), web page titles, or the
 # content type and size for other files.
 link_preview:
   enabled: true
+  # "privmsg": a normal channel message (default). "notice": a notice,
+  # which other bots by convention never respond to.
+  message_type: privmsg
   # Limit to these channels; empty means every channel the bot is in.
   channels: []
   # Never preview links from these nicks (e.g. other bots).
@@ -79,3 +89,22 @@ link_preview:
   # Optional YouTube Data API v3 key, for duration and view counts.
   # Prefer IRCBOT_YOUTUBE_API_KEY in the environment.
   youtube_api_key:
+
+# --- Plugins -----------------------------------------------------------------
+# Ruby files in plugins_dir (one plugin per file, e.g. plugins/dice.rb;
+# examples in contrib/plugins/). Reloading the config ("ircbot-docker
+# reload") loads new files and reloads changed ones without reconnecting.
+# Plugins run with the bot's full privileges: only install code you trust.
+plugins_dir: plugins
+
+# Optional settings per plugin, keyed by file name. Every plugin file is
+# loaded whether or not it is listed here. The bot's options:
+#   enabled:  false to not load it (default true)
+#   private:  commands work by private message, /msg ModeBot ROLL (default true)
+#   prefix:   e.g. "!" (quoted) to also accept !roll in channels (default: none)
+#   channels: limit those channel commands to these channels (default: all)
+# Any other keys are the plugin's own settings.
+plugins:
+  # dice:
+  #   prefix: "!"
+  #   max_dice: 20

@@ -27,7 +27,9 @@ module IRCBot
       "max_accounts" => 5_000,
       "admins" => [],
       "channels" => [],
-      "link_preview" => {}
+      "link_preview" => {},
+      "plugins_dir" => "plugins",
+      "plugins" => {} # plugin name => settings (see PLUGIN_DEFAULTS)
     }.freeze
 
     LINK_PREVIEW_DEFAULTS = {
@@ -37,6 +39,16 @@ module IRCBot
       "ignore_nicks" => [], # e.g. other bots
       "youtube_api_key" => nil
     }.freeze
+
+    # The bot's options for each plugin; any other keys in a plugin's
+    # section are the plugin's own settings.
+    PLUGIN_DEFAULTS = {
+      "enabled" => true,
+      "private" => true, # commands by private message (/msg Bot ROLL)
+      "prefix" => nil,   # e.g. "!": also commands in channels (!roll); nil: not in channels
+      "channels" => []   # limit channel commands to these; empty: every channel
+    }.freeze
+    PLUGIN_PREFIX = /\A[\p{P}\p{S}]{1,3}\z/
 
     module_function
 
@@ -57,12 +69,14 @@ module IRCBot
       config["pepper_file"] = File.expand_path(config["pepper_file"], base)
       config["tls_known_servers"] = File.expand_path(config["tls_known_servers"], base)
       config["status_file"] = File.expand_path(config["status_file"], base)
+      config["plugins_dir"] = File.expand_path(config["plugins_dir"].to_s, base)
       config["alt_nicks"] = Array(config["alt_nicks"]).map(&:to_s)
       config["umodes"] = config["umodes"].to_s
       config["admins"] = Array(config["admins"])
       config["channels"] = Array(config["channels"])
       config["tls_min_version"] = config["tls_min_version"].to_s
       config["link_preview"] = link_preview(config["link_preview"])
+      config["plugins"] = plugins(config["plugins"])
       validate!(config)
       config
     end
@@ -88,6 +102,31 @@ module IRCBot
         raise ConfigError, "link_preview message_type must be privmsg or notice"
       end
       preview
+    end
+
+    def plugins(section)
+      raise ConfigError, "plugins must be a mapping of plugin name to settings" unless section.nil? || section.is_a?(Hash)
+
+      (section || {}).to_h do |name, settings|
+        name = name.to_s
+        raise ConfigError, "plugin name #{name.inspect} must be lowercase letters, digits and _" unless name.match?(PluginManager::NAME)
+        raise ConfigError, "plugins: #{name} must be a mapping" unless settings.nil? || settings.is_a?(Hash)
+
+        settings = PLUGIN_DEFAULTS.merge(settings || {})
+        %w[enabled private].each do |key|
+          raise ConfigError, "plugins: #{name} #{key} must be true or false" unless [true, false].include?(settings[key])
+        end
+        settings["prefix"] = nil if settings["prefix"].to_s.empty?
+        prefix = settings["prefix"]
+        unless prefix.nil? || prefix.to_s.match?(PLUGIN_PREFIX)
+          raise ConfigError, "plugins: #{name} prefix must be 1-3 symbols like \"!\" (quoted), or empty for no channel commands"
+        end
+        settings["channels"] = Array(settings["channels"]).map(&:to_s)
+        settings["channels"].each do |channel|
+          raise ConfigError, "plugins: #{name}: #{channel.inspect} is not a valid channel name" unless channel.match?(Channels::NAME)
+        end
+        [name, settings]
+      end
     end
 
     def validate!(config)

@@ -18,7 +18,8 @@ module IRCBot
       "OP" => :cmd_mode,
       "DEOP" => :cmd_mode,
       "VOICE" => :cmd_mode,
-      "DEVOICE" => :cmd_mode
+      "DEVOICE" => :cmd_mode,
+      "PLUGIN" => :cmd_plugin
     }.freeze
 
     MODE_COMMANDS = { "OP" => "+o", "DEOP" => "-o", "VOICE" => "+v", "DEVOICE" => "-v" }.freeze
@@ -39,7 +40,8 @@ module IRCBot
       "  ACCESS <#chan> ADDMASK <nick!user@host> <voice|op>   (bot admins only)",
       "  ACCESS <#chan> DELMASK <nick!user@host>              (bot admins only)",
       "  CHANREGISTER <#chan> <owner>      (bot admins only)",
-      "  CHANDROP <#chan>                  (channel owner)"
+      "  CHANDROP <#chan>                  (channel owner)",
+      "  PLUGIN LIST|LOAD|UNLOAD|RELOAD [name]   (bot admins only)"
     ].freeze
 
     # Commands carrying a password; only accepted from users connected via TLS.
@@ -106,15 +108,18 @@ module IRCBot
       @nick_attempts = 0
       @welcomed = false
       @joined = false
+      setup_plugins
     end
 
     # (run, signal handling, config reload and the status file are in
-    # bot_runtime.rb)
+    # bot_runtime.rb; plugin support is in bot_plugins.rb)
 
     # Handles one line from the server. Nothing a remote party sends may
     # crash the bot: unexpected errors are logged and the line is dropped.
     def handle(line)
-      dispatch_line(Message.parse(line))
+      msg = Message.parse(line)
+      dispatch_line(msg)
+      notify_plugins(msg)
     rescue ConfigError
       raise # e.g. wrong network: stop the bot
     rescue StandardError => e
@@ -332,7 +337,12 @@ module IRCBot
 
         return warn_public_secret(msg.nick, target)
       end
-      return preview_links(msg, target, text) if channel?(target)
+      if channel?(target)
+        return if plugin_channel_command(msg, target, text)
+
+        @plugins.emit(:message, nick: msg.nick, userhost: msg.userhost, channel: target, text: text, message: msg)
+        return preview_links(msg, target, text)
+      end
       return unless self?(target)
       return if text.start_with?("\x01") # ignore CTCP
 
@@ -343,7 +353,7 @@ module IRCBot
       return if throttled?(msg.userhost, cost: command == "HELP" ? HELP_COST : 1)
 
       ctx = Context.new(nick: msg.nick, userhost: msg.userhost)
-      return reply(ctx, "Unknown command. Try HELP.") unless COMMANDS.key?(command)
+      return run_private_plugin_command(ctx, command, args) unless COMMANDS.key?(command)
 
       dispatch(ctx, command, args)
     end
@@ -376,7 +386,7 @@ module IRCBot
     end
 
     def cmd_help(ctx, _command, _args)
-      HELP.each { |line| reply(ctx, line) }
+      (HELP + @plugins.help_lines(admin: admin?(current_account(ctx)))).each { |line| reply(ctx, line) }
     end
 
     def cmd_register(ctx, _command, args)

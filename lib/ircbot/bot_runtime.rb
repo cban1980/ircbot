@@ -7,7 +7,8 @@ module IRCBot
   # live config reload, and the status file.
   #
   # Signals (sent by bin/ircbot-docker):
-  #   HUP        re-read config.yml and apply it without restarting
+  #   HUP        re-read config.yml and apply it without restarting; also
+  #              loads new plugin files and reloads changed ones
   #   USR1       drop the IRC connection and reconnect
   #   TERM, INT  quit IRC cleanly and exit
   class Bot
@@ -42,6 +43,7 @@ module IRCBot
       end
       @log.info("Stopped.")
     ensure
+      @lock.synchronize { @plugins.unload_all }
       write_status("stopped")
     end
 
@@ -166,6 +168,7 @@ module IRCBot
 
       @accounts.configure(session_ttl: @config["session_ttl_hours"] * 3600, max_accounts: @config["max_accounts"])
       setup_link_preview if changed.include?("link_preview")
+      sync_plugins # also picks up new and changed plugin files
 
       if changed.intersect?(CONNECTION_SETTINGS)
         @rebuild_connection = true
@@ -203,6 +206,7 @@ module IRCBot
         "nick" => @nick,
         "channels" => @roster.channels_of(@nick).sort,
         "connected_since" => @connected_at&.iso8601,
+        "plugins" => @plugins&.status || {},
         "updated_at" => now.iso8601,
         "updated_at_unix" => now.to_i
       }

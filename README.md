@@ -40,10 +40,11 @@ All commands are sent by private message (`/msg ModeBot ...`); replies are notic
 | `CHANDROP <#chan>` | channel owner |
 | `ACCESS <#chan> LIST` / `ADD <account> <voice\|op>` / `DEL <account>` | op and above |
 | `ACCESS <#chan> ADDMASK <nick!user@host> <voice\|op>` / `DELMASK <mask>` | bot admins |
+| `PLUGIN LIST` / `LOAD <name>` / `UNLOAD <name>` / `RELOAD [name]` | bot admins (see [Plugins](#plugins)) |
 
 **Masks** give voice/op on join to anyone matching `nick!user@host`,
 without identifying. Nick and user may use `*`/`?`; the host must be an
-exact hostname or IP (e.g. `*!*user@host.example.net`), so a mask can't
+exact hostname or IP (e.g. `*!*zphinx@home.archflux.net`), so a mask can't
 cover a whole network. Anyone else connecting from that host and matching
 the mask gets the mode too.
 | `UP <#chan>` / `DOWN <#chan>` | voice and above |
@@ -72,8 +73,10 @@ bin/ircbot-docker logs -f
 bin/ircbot-docker reload                      # apply config.yml/data changes live
 bin/ircbot-docker reconnect                   # new IRC connection
 bin/ircbot-docker channel register '#chan' <owner>   # the bot joins right away
+bin/ircbot-docker plugin install contrib/plugins/dice.rb   # loads it right away
+bin/ircbot-docker plugin list                 # loaded plugins, commands, load errors
 bin/ircbot-docker restart                     # checks the config first
-bin/ircbot-docker update                      # rebuild on a fresh base image, restart
+bin/ircbot-docker update                      # git pull main, rebuild on a fresh base image, restart
 bin/ircbot-docker test                        # run the test suite on trixie
 bin/ircbot-docker --help                      # everything else
 ```
@@ -81,13 +84,14 @@ bin/ircbot-docker --help                      # everything else
 **Live reload** (`reload`, `edit`, `channel register|drop`): the bot
 re-reads `config.yml` on SIGHUP. Admins, channels (joined/parted),
 nick, user modes, link previews and limits apply immediately; changes to
-server, TLS, network, user or realname make it reconnect. An invalid
+server, TLS, network, user or realname make it reconnect. New and
+changed plugin files are loaded too, without reconnecting. An invalid
 config is refused and the bot keeps running with the old one (the script
 also checks before sending). `data_file`, `pepper_file` and
 `status_file` need a `restart`. Account changes never need a reload.
 
 **Moving to another server:** `bin/ircbot-docker backup` writes one
-archive with `config.yml`, `data/` and `secret/` (keep it private: it
+archive with `config.yml`, `data/`, `secret/` and `plugins/` (keep it private: it
 holds the pepper and password hashes). On the new server, with this repo
 and Docker installed: `bin/ircbot-docker restore FILE && bin/ircbot-docker
 start`. IRCnet admits clients by IP, so check that its server accepts the
@@ -126,6 +130,95 @@ When someone posts a link in a channel, the bot replies in the channel:
   previewing each other.
 - Configure under `link_preview:` (`enabled`, `message_type`, `channels`,
   `ignore_nicks`, `youtube_api_key`).
+
+## Plugins
+
+Plugins add commands and react to channel events, much like cogs in a
+Discord bot. Each one is a Ruby file in the instance's `plugins/` folder
+(`plugins_dir` in `config.yml`), loaded, reloaded and unloaded while the
+bot stays connected:
+
+```sh
+bin/ircbot-docker plugin install contrib/plugins/dice.rb   # copy in and load
+bin/ircbot-docker plugin list
+bin/ircbot-docker plugin remove dice                       # delete and unload
+bin/ircbot-docker reload       # after editing a plugin or its settings
+```
+
+A reload loads new files, reloads changed files and plugins whose
+settings changed, and unloads removed or disabled ones. If a changed
+plugin fails to load, the previous version keeps running and the error
+shows in `plugin list`. Bot admins can do the same over IRC with
+`PLUGIN LIST`, `PLUGIN LOAD|UNLOAD|RELOAD <name>` and `PLUGIN RELOAD`
+(the whole folder); `UNLOAD` sticks until `LOAD` or a restart.
+
+**Per-plugin settings** go under `plugins:`, keyed by file name:
+
+```yaml
+plugins:
+  dice:
+    prefix: "!"          # also answer !roll in channels (quote it in YAML)
+    private: true        # commands by /msg (default true)
+    channels: ["#games"] # limit the channel commands (default: every channel)
+    max_dice: 20         # anything else is the plugin's own setting
+  seen:
+    enabled: false       # don't load it
+```
+
+Without `prefix`, a plugin's commands only work by private message, like
+the built-in ones; with `private: false` and a prefix, only in channels.
+`HELP` lists plugin commands and how to use them.
+
+**Writing a plugin:** one class per file, inheriting from `IRCBot::Plugin`:
+
+```ruby
+class Dice < IRCBot::Plugin
+  description "Rolls dice"
+  defaults "sides" => 6                      # overridden by config.yml
+
+  command "ROLL", usage: "ROLL [count]", help: "roll dice" do |ctx, args|
+    count = (args.first || 1).to_i.clamp(1, 10)
+    ctx.reply(Array.new(count) { rand(1..settings["sides"]) }.join(" "))
+  end
+
+  on :join do |event|
+    notice(event.nick, "Welcome to #{event.channel}!") unless event.nick == bot_nick
+  end
+end
+```
+
+- `command NAME, usage:, help:, admin:, identified:` with a block taking
+  `(ctx, args)`. `ctx.reply` answers in the channel (or by notice for a
+  private message), `ctx.reply_privately`, `ctx.nick`, `ctx.channel`,
+  `ctx.account` (identified bot account or nil), `ctx.admin?`,
+  `ctx.access_level`, `ctx.usage!`. `raise IRCBot::Error, "text"` sends
+  the text back to the user. Built-in command names can't be taken.
+- `on EVENT` with `:connected`, `:message` (channel messages), `:join`,
+  `:part`, `:kick`, `:quit`, `:nick` or `:line` (every line received,
+  except ones carrying a password command). The event has `nick`,
+  `userhost`, `channel`, `text`, `new_nick` and the parsed `message`.
+- `say`, `notice`, `action`, `bot_nick`, `channels`, `account_for(nick)`,
+  `admin?(account)`, `access_level(channel, account)`, `settings`, `log`.
+- `data` is the plugin's own JSON file (`data/plugins/<name>.json`):
+  `data["key"]`, `data["key"] = value`, `data.update { |hash| ... }`.
+- `setup` and `teardown` run on load and unload (and at shutdown);
+  `every(seconds) { ... }` and `after(seconds) { ... }` are timers that
+  stop on unload. `background { ... }` runs slow work, such as HTTP
+  requests, on a worker thread.
+
+Commands, hooks and timers run one at a time with the bot's IRC handling,
+so they must be quick; use `background` for anything that waits. An
+exception in a plugin is logged and never stops the bot. Plugin commands
+share the bot's command rate limits, and output is split on line breaks
+and cut to fit, so a plugin can't inject raw protocol lines. Only the
+standard library is available (the image has no gems). See
+[contrib/plugins/](contrib/plugins/) for two complete examples.
+
+**Plugins are trusted code.** They run inside the bot with its full
+privileges, including access to the password pepper and hashes, so only
+install plugins you have read. The bot refuses to load plugins from a
+folder or file that other users can write to; `plugin install` copies
+files in with private permissions.
 
 ## Security
 
