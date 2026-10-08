@@ -182,6 +182,49 @@ class BotTest < Minitest::Test
     assert_equal ["PONG :abc", "NICK ModeBot"], @conn.lines
   end
 
+  def test_checks_whether_primary_nick_is_free
+    connect_fresh("alt_nicks" => %w[ModeBot2])
+    @bot.handle(":server 433 * ModeBot :Nickname is already in use")
+    @bot.handle(":server 001 ModeBot2 :Welcome")
+    @conn.clear
+
+    @bot.send(:check_nick)
+    assert_equal ["ISON ModeBot"], @conn.lines
+    @bot.handle(":server 303 ModeBot2 :ModeBot")
+    assert_equal ["ISON ModeBot"], @conn.lines, "still taken: no NICK"
+
+    @bot.handle(":server 303 ModeBot2 :")
+    assert_equal "NICK ModeBot", @conn.lines.last
+
+    @bot.handle(":ModeBot2!bot@host NICK :ModeBot")
+    @conn.clear
+    @bot.send(:check_nick)
+    assert_empty @conn.lines, "no checks once it has the nick"
+  end
+
+  def test_monitor_retakes_primary_nick_when_it_goes_offline
+    connect_fresh("alt_nicks" => %w[ModeBot2])
+    @bot.handle(":server 433 * ModeBot :Nickname is already in use")
+    @bot.handle(":server 001 ModeBot2 :Welcome")
+    @bot.handle(":server 005 ModeBot2 MONITOR=100 NETWORK=Example :are supported")
+    @conn.clear
+
+    @bot.handle(":server 376 ModeBot2 :End of MOTD")
+    assert_equal ["MONITOR + ModeBot"], @conn.lines
+
+    @bot.handle(":server 731 ModeBot2 :ModeBot")
+    assert_equal "NICK ModeBot", @conn.lines.last
+  end
+
+  def test_no_monitor_without_server_support
+    connect_fresh
+    @bot.handle(":server 001 ModeBot :Welcome")
+    @conn.clear
+    @bot.handle(":server 376 ModeBot :End of MOTD")
+
+    refute(@conn.lines.any? { |l| l.start_with?("MONITOR") })
+  end
+
   def test_joins_configured_and_registered_channels_on_welcome
     setup_channel
     @bot.send(:reset_state) # as after a reconnect

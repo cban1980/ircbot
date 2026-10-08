@@ -79,11 +79,21 @@ module IRCBot
     HELP_COST = 4 # HELP sends many lines
     MAX_PENDING_WHOIS = 50
 
-    attr_reader :nick
+    # Without the main nick, how often to check whether it is free (ISON).
+    # Servers with MONITOR also report it the moment it is.
+    NICK_CHECK_INTERVAL = 60
 
+    attr_reader :nick, :network_id
+
+    # config: one network's flat config (see Config.network); a whole loaded
+    # config means its first network. status_sink: called with (network,
+    # status hash) instead of writing the status file (see Supervisor).
     def initialize(config, connection: nil, store: nil, hasher: nil, clock: nil, previewer: nil,
-                   preview_pool: nil, config_path: nil, logger: Logger.new($stdout))
+                   preview_pool: nil, config_path: nil, status_sink: nil, logger: Logger.new($stdout))
+      config = Config.network(config)
       @config = config
+      @network_id = config["id"] || Config::DEFAULT_NETWORK
+      @status_sink = status_sink
       @config_path = config_path # enables reloading on SIGHUP
       @log = logger
       @own_connection = connection.nil? # rebuilt when connection settings change
@@ -96,7 +106,7 @@ module IRCBot
       @accounts = Accounts.new(store, hasher, clock: @clock,
                                               session_ttl: config.fetch("session_ttl_hours", 24) * 3600,
                                               max_accounts: config.fetch("max_accounts", Accounts::DEFAULT_MAX_ACCOUNTS))
-      @channels = Channels.new(store)
+      @channels = Channels.new(store, network: @network_id)
       @roster = Roster.new
       @login_limiter = RateLimiter.new(window: LOGIN_WINDOW, clock: @clock)
       @register_limiter = RateLimiter.new(window: REGISTER_WINDOW, clock: @clock)
@@ -135,6 +145,8 @@ module IRCBot
       when "001" then on_welcome(msg)
       when "005" then on_isupport(msg)
       when "376", "422" then on_end_of_motd # end of MOTD / no MOTD
+      when "303" then on_ison(msg)
+      when "731" then on_monitor_offline(msg)
       # 432 erroneous, 433 in use, 437 unavailable (IRCnet nick delay)
       when "432", "433", "437" then on_nick_rejected
       when "353" then @roster.add_names(msg.params[2], msg.params[3].to_s.split)
@@ -164,6 +176,8 @@ module IRCBot
       @network_name = nil
       @nick = @config["nick"]
       @nick_attempts = 0
+      @monitor_supported = false
+      @monitoring = false
       @roster.clear
       @accounts.clear_sessions
       @secure_users.clear
@@ -181,10 +195,13 @@ module IRCBot
     # With "network" configured, channels are only joined once the server
     # has confirmed the network name (ISUPPORT NETWORK=...).
     def on_isupport(msg)
-      token = msg.params[1..-2].to_a.find { |param| param.start_with?("NETWORK=") } or return
+      tokens = msg.params[1..-2].to_a
+      @monitor_supported ||= tokens.any? { |param| param == "MONITOR" || param.start_with?("MONITOR=") }
+      token = tokens.find { |param| param.start_with?("NETWORK=") } or return
 
       actual = token.delete_prefix("NETWORK=")
       @network_name = actual
+      write_status
       expected = @config["network"] or return
       return join_channels if actual.casecmp?(expected)
 
@@ -192,6 +209,7 @@ module IRCBot
     end
 
     def on_end_of_motd
+      watch_primary_nick
       return unless @config["network"] && !@joined
 
       wrong_network!("the server did not report its network name, so it can't be confirmed as #{@config['network']}")
@@ -232,6 +250,35 @@ module IRCBot
       send_raw("NICK #{@config['nick']}") if @welcomed && !self?(@config["nick"])
     end
 
+    # Asks the server to report when the main nick goes offline (MONITOR),
+    # so it is retaken at once, even with no channel in common with its
+    # holder. Also called when the nick setting changes.
+    def watch_primary_nick
+      return unless @monitor_supported && @welcomed
+
+      send_raw("MONITOR C") if @monitoring
+      send_raw("MONITOR + #{@config['nick']}")
+      @monitoring = true
+    end
+
+    # Called every NICK_CHECK_INTERVAL while connected: without the main
+    # nick, asks whether it is in use (answered by 303, see on_ison).
+    def check_nick
+      send_raw("ISON #{@config['nick']}") if @welcomed && !self?(@config["nick"])
+    end
+
+    # RPL_ISON: the nicks from the ISON request that are online.
+    def on_ison(msg)
+      online = msg.params.last.to_s.split
+      regain_nick unless online.any? { |nick| Casemap.eq?(nick, @config["nick"]) }
+    end
+
+    # RPL_MONOFFLINE: watched nicks that just went offline.
+    def on_monitor_offline(msg)
+      offline = msg.params.last.to_s.split(",").map { |target| target.split("!", 2).first }
+      regain_nick if offline.any? { |nick| Casemap.eq?(nick, @config["nick"]) }
+    end
+
     # --- channel membership ------------------------------------------------
 
     def on_join(msg)
@@ -270,6 +317,7 @@ module IRCBot
     def on_nick(old_nick, new_nick)
       if self?(old_nick)
         @nick = new_nick
+        @log.info("Got the main nick #{new_nick} back") if Casemap.eq?(new_nick, @config["nick"])
         write_status
       end
       @roster.rename(old_nick, new_nick)

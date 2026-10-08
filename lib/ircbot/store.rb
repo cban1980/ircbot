@@ -12,7 +12,7 @@ module IRCBot
   #   data file must be a regular file we own. Symlinks are not followed.
   class Store
     # sections: top-level keys that always exist (hashes).
-    def initialize(path, sections: %w[accounts channels])
+    def initialize(path, sections: %w[accounts networks])
       @path = path
       @sections = sections
       @dir = File.dirname(path)

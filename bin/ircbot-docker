@@ -77,6 +77,8 @@ Accounts and channels (work while the bot runs):
   channel mask-add #CHAN MASK voice|op    auto-mode on join for nick!user@host
                                           (exact host, e.g. '*!*me@home.example.net')
   channel mask-del #CHAN MASK
+  channel -n NETWORK ...                  pick the network (needed with several
+                                          networks; accounts are shared by all)
 
 Configuration:
   edit                      open config.yml in \$EDITOR, check it, reload if running
@@ -371,10 +373,13 @@ cmd_status() {
     s = JSON.parse(File.read("/bot/data/status.json"))
     age = Time.now.to_i - s["updated_at_unix"].to_i
     puts "Bot:       #{s["state"]} (updated #{age}s ago)"
-    puts "Server:    #{s["server"]}:#{s["port"]}#{" (#{s["network"]})" if s["network"]}"
-    puts "Nick:      #{s["nick"]}"
-    puts "Channels:  #{s["channels"].empty? ? "none" : s["channels"].join(" ")}"
-    puts "Since:     #{s["connected_since"] || "-"}"
+    (s["networks"] || {}).each do |id, n|
+      puts "Network:   #{id}  #{n["state"]}"
+      puts "  Server:    #{n["server"]}:#{n["port"]}#{" (#{n["network"]})" if n["network"]}"
+      puts "  Nick:      #{n["nick"]}"
+      puts "  Channels:  #{n["channels"].empty? ? "none" : n["channels"].join(" ")}"
+      puts "  Since:     #{n["connected_since"] || "-"}"
+    end
     plugins = (s["plugins"] || {}).map { |name, p| p["state"] == "loaded" ? name : "#{name} (#{p["state"]})" }
     puts "Plugins:   #{plugins.empty? ? "none" : plugins.join(" ")}"'
   if is_running; then
@@ -412,7 +417,13 @@ cmd_account() {
 }
 
 cmd_channel() {
-  [ $# -gt 0 ] || die "usage: $PROG channel list | show #CHAN | register #CHAN OWNER | drop #CHAN | mask-add #CHAN MASK LEVEL | mask-del #CHAN MASK"
+  local network=()
+  if [ "${1:-}" = "-n" ] || [ "${1:-}" = "--network" ]; then
+    [ $# -ge 2 ] || die "$1 needs a network name"
+    network=(--network "$2")
+    shift 2
+  fi
+  [ $# -gt 0 ] || die "usage: $PROG channel [-n NETWORK] list | show #CHAN | register #CHAN OWNER | drop #CHAN | mask-add #CHAN MASK LEVEL | mask-del #CHAN MASK"
   local action=$1 tool_cmd
   shift
   case "$action" in
@@ -426,7 +437,7 @@ cmd_channel() {
   esac
   require_instance
   ensure_image
-  run_tool /app/bin/ircbot-account --config /bot/config.yml "$tool_cmd" "$@"
+  run_tool /app/bin/ircbot-account --config /bot/config.yml "${network[@]}" "$tool_cmd" "$@"
   if [[ "$action" =~ ^(register|drop)$ ]] && is_running; then
     cmd_reload
   fi

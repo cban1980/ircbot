@@ -133,6 +133,6 @@ module IRCBot
 
     def plugin_pool = @plugin_pool ||= WorkerPool.new(size: 2, max_queue: 50, logger: @log)
 
-    def plugin_data_dir = File.join(File.dirname(@config["data_file"]), "plugins")
+    def plugin_data_dir = @config["plugin_data_dir"] || File.join(File.dirname(@config["data_file"]), "plugins")
   end
 end

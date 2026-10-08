@@ -3,6 +3,10 @@ require "time"
 module IRCBot
   # Registered channels, their per-account access lists, and hostmask
   # entries (auto-voice/op on join by nick!user@host, managed by admins).
+  #
+  # Channels belong to one network: an instance sees only its network's
+  # channels, stored under data["networks"][name]["channels"]. Accounts
+  # are shared by all networks.
   class Channels
     LEVELS = { "voice" => 1, "op" => 2, "owner" => 3 }.freeze
     MODES = { "voice" => "v", "op" => "o", "owner" => "o" }.freeze
@@ -39,25 +43,70 @@ module IRCBot
       Casemap.downcase(prefix).match?(/\A#{pattern}\z/)
     end
 
-    def initialize(store)
+    def self.network_key(network) = network.to_s.downcase
+
+    # Moves channels from the single-network data layout (a top-level
+    # "channels" section) to the given network. Returns how many moved.
+    def self.adopt_legacy!(store, network)
+      return 0 unless store.read { |data| data.key?("channels") }
+
+      store.transaction do |data|
+        legacy = data.delete("channels") || {}
+        section = network_section(data, network)
+        section["channels"] = legacy.merge(section["channels"])
+        legacy.size
+      end
+    end
+
+    # { network name => [channel, ...] } for every network with channels.
+    def self.by_network(store)
+      store.read do |data|
+        data["networks"].values.filter_map do |net|
+          names = net.fetch("channels", {}).values.map { |c| c["name"] }
+          [net["name"], names] if names.any?
+        end.to_h
+      end
+    end
+
+    # [[network, channel], ...] owned by the account, on every network.
+    def self.owned_anywhere(store, account)
+      store.read do |data|
+        data["networks"].values.flat_map do |net|
+          net.fetch("channels", {}).values.select { |chan| Casemap.eq?(chan["owner"], account) }
+             .map { |chan| [net["name"], chan["name"]] }
+        end
+      end
+    end
+
+    def self.network_section(data, network)
+      section = (data["networks"][network_key(network)] ||= { "name" => network.to_s })
+      section["channels"] ||= {}
+      section
+    end
+
+    attr_reader :network
+
+    def initialize(store, network: Config::DEFAULT_NETWORK)
       @store = store
+      @network = network.to_s
     end
 
     def registered?(channel)
-      @store.read { |data| data["channels"].key?(key(channel)) }
+      @store.read { |data| all(data).key?(key(channel)) }
     end
 
     def names
-      @store.read { |data| data["channels"].values.map { |c| c["name"] } }
+      @store.read { |data| all(data).values.map { |c| c["name"] } }
     end
 
     def register(channel, owner)
       raise Error, "#{channel} is not a valid channel name." unless channel.match?(NAME)
 
       @store.transaction do |data|
-        raise Error, "#{channel} is already registered." if data["channels"].key?(key(channel))
+        channels = self.class.network_section(data, @network)["channels"]
+        raise Error, "#{channel} is already registered." if channels.key?(key(channel))
 
-        data["channels"][key(channel)] = {
+        channels[key(channel)] = {
           "name" => channel,
           "owner" => owner,
           "access" => {},
@@ -67,13 +116,13 @@ module IRCBot
     end
 
     def drop(channel)
-      @store.transaction { |data| data["channels"].delete(key(channel)) }
+      @store.transaction { |data| all(data).delete(key(channel)) }
     end
 
     # The access level name an account holds on a channel, or nil.
     def level(channel, account)
       @store.read do |data|
-        chan = data["channels"][key(channel)]
+        chan = all(data)[key(channel)]
         next nil unless chan && account
         next "owner" if Casemap.eq?(chan["owner"], account)
 
@@ -117,7 +166,7 @@ module IRCBot
     # [[mask, level, added_by], ...], highest level first.
     def masks(channel)
       @store.read do |data|
-        entries = data["channels"].dig(key(channel), "masks") || {}
+        entries = all(data).dig(key(channel), "masks") || {}
         entries.values.map { |e| [e["mask"], e["level"], e["added_by"]] }
                .sort_by { |mask, level, _| [-self.class.rank(level), mask] }
       end
@@ -131,22 +180,27 @@ module IRCBot
       masks(channel).find { |mask, _level, _by| self.class.mask_match?(mask, prefix) }&.first(2)&.reverse
     end
 
-    # Channels owned by the account.
+    # Channels on this network owned by the account.
     def owned_by(account)
       @store.read do |data|
-        data["channels"].values.select { |chan| Casemap.eq?(chan["owner"], account) }.map { |chan| chan["name"] }
+        all(data).values.select { |chan| Casemap.eq?(chan["owner"], account) }.map { |chan| chan["name"] }
       end
     end
 
-    # Removes the account from every access list.
+    # Removes the account from every access list, on every network
+    # (accounts are shared by all networks).
     def forget(account)
-      @store.transaction { |data| data["channels"].each_value { |chan| chan["access"].delete(key(account)) } }
+      @store.transaction do |data|
+        data["networks"].each_value do |net|
+          net.fetch("channels", {}).each_value { |chan| chan["access"].delete(key(account)) }
+        end
+      end
     end
 
     # [[account, level], ...] with the owner first, then by rank descending.
     def access_list(channel)
       @store.read do |data|
-        chan = data["channels"][key(channel)]
+        chan = all(data)[key(channel)]
         next [] unless chan
 
         entries = chan["access"].values.map { |e| [e["account"], e["level"]] }
@@ -158,9 +212,12 @@ module IRCBot
 
     def key(name) = Casemap.downcase(name)
 
+    # This network's channels; read-only use (may be a throwaway hash).
+    def all(data) = data["networks"].dig(self.class.network_key(@network), "channels") || {}
+
     def modify(channel)
       @store.transaction do |data|
-        chan = data["channels"][key(channel)]
+        chan = all(data)[key(channel)]
         raise Error, "#{channel} is not registered." unless chan
 
         yield chan

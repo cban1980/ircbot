@@ -1,4 +1,7 @@
 # Copy to config.yml and adjust.
+#
+# This is a config for one network. To use several at once, add a
+# "networks:" section (see the end of this file and the README).
 
 # An IRCnet server with a TLS port that accepts your IP address.
 server: irc.example.net
@@ -108,3 +111,23 @@ plugins:
   # dice:
   #   prefix: "!"
   #   max_dice: 20
+
+# --- Several networks ----------------------------------------------------------
+# To be on several networks at once, move server, network, tls_fingerprint
+# and channels into a section per network. Any identity or TLS setting
+# above can also be overridden per network; the others (admins, storage,
+# link_preview, plugins) apply to all. Accounts are shared by all networks;
+# channels are registered per network.
+# networks:
+#   IRCnet:
+#     server: irc.example.net
+#     network: IRCnet
+#     channels:
+#       - "#mychannel"
+#   EFnet:
+#     server: irc.underworld.no
+#     network: EFnet
+#     tls_self_signed: true
+#     nick: ModeBot
+#     channels:
+#       - "#gunnit"

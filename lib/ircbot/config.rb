@@ -50,19 +50,34 @@ module IRCBot
     }.freeze
     PLUGIN_PREFIX = /\A[\p{P}\p{S}]{1,3}\z/
 
+    # Settings that can be set per network under "networks:". At the top
+    # level they are defaults for every network, except NETWORK_ONLY ones.
+    NETWORK_SETTINGS = %w[
+      server network port tls tls_verify tls_min_version tls_fingerprint tls_ciphers tls_self_signed
+      allow_insecure require_secure_users nick alt_nicks user realname umodes channels
+    ].freeze
+    NETWORK_ONLY = %w[server network tls_fingerprint channels].freeze
+    # Network names, as used in "networks:", logs and the data file.
+    NETWORK_NAME = /\A[A-Za-z][A-Za-z0-9_.-]{0,29}\z/
+    # The network name of a single-server config without "network:".
+    DEFAULT_NETWORK = "default".freeze
+
     module_function
 
+    # Returns the global settings plus "networks": one flat config per
+    # network (global settings merged with that network's, and "id" set to
+    # the network name). A config without "networks:" is one network.
     def load(path)
       from_file = File.exist?(path) ? YAML.safe_load_file(path) || {} : {}
       raise ConfigError, "#{path} must contain a mapping of settings" unless from_file.is_a?(Hash)
 
-      unknown = from_file.keys - DEFAULTS.keys
+      unknown = from_file.keys - DEFAULTS.keys - ["networks"]
       raise ConfigError, "Unknown setting(s) in #{path}: #{unknown.join(', ')}" if unknown.any?
 
       # A secret in the config file means the file itself must be private.
       SecureFile.check!(path) if from_file.dig("link_preview", "youtube_api_key")
 
-      config = DEFAULTS.merge(from_file)
+      config = DEFAULTS.merge(from_file.except("networks"))
       # Relative paths are resolved against the config file's directory.
       base = File.dirname(File.expand_path(path))
       config["data_file"] = File.expand_path(config["data_file"], base)
@@ -70,15 +85,84 @@ module IRCBot
       config["tls_known_servers"] = File.expand_path(config["tls_known_servers"], base)
       config["status_file"] = File.expand_path(config["status_file"], base)
       config["plugins_dir"] = File.expand_path(config["plugins_dir"].to_s, base)
-      config["alt_nicks"] = Array(config["alt_nicks"]).map(&:to_s)
-      config["umodes"] = config["umodes"].to_s
       config["admins"] = Array(config["admins"])
-      config["channels"] = Array(config["channels"])
-      config["tls_min_version"] = config["tls_min_version"].to_s
       config["link_preview"] = link_preview(config["link_preview"])
       config["plugins"] = plugins(config["plugins"])
-      validate!(config)
+      normalize_network!(config)
+      validate_access!(config)
+
+      if from_file.key?("networks")
+        misplaced = NETWORK_ONLY & from_file.keys
+        if misplaced.any?
+          raise ConfigError, "#{misplaced.join(', ')} must be set for each network under networks:, not at the top level"
+        end
+
+        config["networks"] = networks(from_file["networks"], config)
+      else
+        validate!(config)
+        name = config["network"] || DEFAULT_NETWORK
+        unless name.to_s.match?(NETWORK_NAME)
+          raise ConfigError, "network #{name.inspect} must start with a letter and contain only letters, digits, _ . -"
+        end
+
+        config["networks"] = [config.merge("id" => name.to_s)]
+      end
       config
+    end
+
+    # One network's flat config from a config loaded with load: the network
+    # named id, or the only/first one. A flat config is returned as is.
+    def network(config, id = nil)
+      return config unless config.key?("networks")
+
+      list = config["networks"]
+      return list.first unless id
+
+      list.find { |net| net["id"].casecmp?(id) }
+    end
+
+    def networks(section, config)
+      unless section.is_a?(Hash) && section.any?
+        raise ConfigError, "networks must be a mapping of network names to their settings"
+      end
+
+      list = section.map do |name, settings|
+        name = name.to_s
+        unless name.match?(NETWORK_NAME)
+          raise ConfigError, "network name #{name.inspect} must start with a letter and contain only letters, digits, _ . -"
+        end
+        raise ConfigError, "networks: #{name} must be a mapping" unless settings.is_a?(Hash)
+
+        unknown = settings.keys - NETWORK_SETTINGS
+        if unknown.any?
+          raise ConfigError, "networks: #{name}: #{unknown.join(', ')} can't be set per network " \
+                             "(per network: #{NETWORK_SETTINGS.join(', ')})"
+        end
+
+        net = config.except("networks").merge(settings).merge(
+          "id" => name,
+          # Plugins keep separate data per network.
+          "plugin_data_dir" => File.join(File.dirname(config["data_file"]), "plugins", name.downcase)
+        )
+        normalize_network!(net)
+        begin
+          validate!(net)
+        rescue ConfigError => e
+          raise ConfigError, "networks: #{name}: #{e.message}"
+        end
+        net
+      end
+      duplicate = list.map { |net| net["id"].downcase }.tally.find { |_, count| count > 1 }
+      raise ConfigError, "networks: #{duplicate[0]} is listed more than once" if duplicate
+
+      list
+    end
+
+    def normalize_network!(config)
+      config["alt_nicks"] = Array(config["alt_nicks"]).map(&:to_s)
+      config["umodes"] = config["umodes"].to_s
+      config["channels"] = Array(config["channels"])
+      config["tls_min_version"] = config["tls_min_version"].to_s
     end
 
     # RFC 2812 nick: a letter or special character, then letters, digits,
@@ -129,10 +213,13 @@ module IRCBot
       end
     end
 
+    # Checks one network's settings (a legacy config is one network).
     def validate!(config)
       raise ConfigError, "server is not set" if config["server"].to_s.empty?
       validate_identity!(config)
-      validate_access!(config)
+      config["channels"].each do |channel|
+        raise ConfigError, "#{channel.inspect} is not a valid channel name" unless channel.to_s.match?(Channels::NAME)
+      end
       unless Connection::TLS_VERSIONS.key?(config["tls_min_version"])
         raise ConfigError, "tls_min_version must be one of #{Connection::TLS_VERSIONS.keys.join(', ')}"
       end
@@ -167,9 +254,6 @@ module IRCBot
     def validate_access!(config)
       config["admins"].each do |admin|
         raise ConfigError, "admin #{admin.inspect} is not a valid IRC nick" unless admin.to_s.match?(NICK)
-      end
-      config["channels"].each do |channel|
-        raise ConfigError, "#{channel.inspect} is not a valid channel name" unless channel.to_s.match?(Channels::NAME)
       end
       %w[session_ttl_hours max_accounts].each do |name|
         value = config[name]

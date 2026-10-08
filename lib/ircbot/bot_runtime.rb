@@ -6,12 +6,13 @@ module IRCBot
   # The bot's process lifecycle: the connect/reconnect loop, Unix signals,
   # live config reload, and the status file.
   #
-  # Signals (sent by bin/ircbot-docker):
-  #   HUP        re-read config.yml and apply it without restarting; also
-  #              loads new plugin files and reloads changed ones
-  #   USR1       drop the IRC connection and reconnect
-  #   TERM, INT  quit IRC cleanly and exit
+  # Run on its own, a Bot handles the signals itself (see SignalHandling);
+  # under a Supervisor (several networks), the supervisor does, and passes
+  # each network its part of the reloaded config. A reload also loads new
+  # plugin files and reloads changed ones.
   class Bot
+    include SignalHandling
+
     # Settings that only take effect on a new connection; changing them on
     # reload makes the bot reconnect.
     CONNECTION_SETTINGS = %w[
@@ -55,12 +56,18 @@ module IRCBot
         return false
       end
 
-      new_config = Config.load(@config_path)
-      @lock.synchronize { apply_config(new_config) }
+      new_config = Config.network(Config.load(@config_path), @network_id) or
+        raise ConfigError, "network #{@network_id} is no longer in the config"
+      apply_network_config(new_config)
       true
     rescue ConfigError, Psych::Exception => e
       @log.error("Config reload failed; still running with the previous settings: #{e.message}")
       false
+    end
+
+    # Applies this network's part of a reloaded config (see reload_config).
+    def apply_network_config(new_config)
+      @lock.synchronize { apply_config(new_config) }
     end
 
     def request_reconnect(reason = "Reconnecting")
@@ -79,27 +86,6 @@ module IRCBot
 
     private
 
-    def install_signal_handlers
-      actions = Queue.new
-      { "HUP" => :reload, "USR1" => :reconnect, "TERM" => :stop, "INT" => :stop }.each do |signal, action|
-        Signal.trap(signal) { actions << action } # trap context: only enqueue
-      end
-      Thread.new do
-        Thread.current.name = "ircbot-signals"
-        loop { perform(actions.pop) }
-      end
-    end
-
-    def perform(action)
-      case action
-      when :reload then reload_config
-      when :reconnect then request_reconnect
-      when :stop then stop
-      end
-    rescue StandardError => e
-      @log.error("#{action} failed: #{e.class}: #{e.message}")
-    end
-
     # One connection, from connect to disconnect. Errors end the connection;
     # the caller decides whether and when to reconnect.
     def run_connection
@@ -117,6 +103,7 @@ module IRCBot
         @connected_at = Time.now.utc
         register_connection
       end
+      ticker = start_nick_checks
       while (line = @conn.gets)
         @log.debug("<< #{redact(line.chomp)}")
         @lock.synchronize { handle(line) }
@@ -125,12 +112,26 @@ module IRCBot
     rescue IOError, SystemCallError, SocketError, OpenSSL::SSL::SSLError => e
       @log.error("Connection error: #{e.class}: #{e.message}") unless intentional_disconnect?
     ensure
+      ticker&.kill
       @lock.synchronize do
         @conn.close
         @had_welcome = @welcomed
         reset_state
         @connected_at = nil
         write_status("disconnected") unless @stopping
+      end
+    end
+
+    # Checks for the main nick in the background (see Bot#check_nick).
+    def start_nick_checks
+      Thread.new do
+        Thread.current.name = "ircbot-nick-#{@network_id}"
+        loop do
+          sleep NICK_CHECK_INTERVAL
+          @lock.synchronize { check_nick }
+        rescue IOError, SystemCallError, OpenSSL::SSL::SSLError
+          nil # the read loop notices the broken connection
+        end
       end
     end
 
@@ -176,7 +177,10 @@ module IRCBot
       end
 
       if @welcomed
-        send_raw("NICK #{@config['nick']}") if changed.include?("nick") && !self?(@config["nick"])
+        if changed.include?("nick")
+          send_raw("NICK #{@config['nick']}") unless self?(@config["nick"])
+          watch_primary_nick
+        end
         send_raw("MODE #{@nick} #{@config['umodes']}") if changed.include?("umodes") && !@config["umodes"].empty?
       end
       sync_channels
@@ -193,13 +197,14 @@ module IRCBot
       current.reject { |j| wanted.any? { |c| Casemap.eq?(c, j) } }.each { |c| send_raw("PART #{c} :No longer configured") }
     end
 
-    # Writes the bot's state for "ircbot-docker status" and health checks.
+    # Writes the bot's state for "ircbot-docker status" and health checks,
+    # or hands it to the supervisor, which writes all networks' states.
     def write_status(state = nil)
-      path = @config["status_file"] or return
       @status_state = state if state
       now = Time.now.utc
       status = {
         "state" => @status_state || "starting",
+        "id" => @network_id,
         "server" => @config["server"],
         "port" => @config["port"],
         "network" => @network_name,
@@ -210,14 +215,22 @@ module IRCBot
         "updated_at" => now.iso8601,
         "updated_at_unix" => now.to_i
       }
+      return @status_sink.call(@network_id, status) if @status_sink
+
+      path = @config["status_file"] or return
+      Bot.write_status_file(path, status)
+    rescue SystemCallError, IOError => e
+      @log.warn("Could not write the status file: #{e.message}")
+    end
+
+    # Replaces the status file atomically, readable only by the bot's user.
+    def self.write_status_file(path, status)
       FileUtils.mkdir_p(File.dirname(path), mode: 0o700)
       tmp = "#{path}.#{Process.pid}.#{Thread.current.object_id}.tmp"
       File.open(tmp, File::WRONLY | File::CREAT | File::TRUNC | File::NOFOLLOW, 0o600) do |file|
         file.write(JSON.pretty_generate(status))
       end
       File.rename(tmp, path)
-    rescue SystemCallError, IOError => e
-      @log.warn("Could not write the status file: #{e.message}")
     end
   end
 end

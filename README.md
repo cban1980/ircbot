@@ -15,13 +15,65 @@ IRCBOT_LOG_LEVEL=debug bin/ircbot  # log raw traffic (passwords are redacted)
 The bot's identity is set in `config.yml`: `nick` plus fallback
 `alt_nicks`, `user` (ident), `realname` and `umodes` (its own user
 modes, `+i` by default). If its nick is taken it uses an alternative and
-retries the primary nick on every server PING and whenever the holder
-quits or changes nick.
+takes the primary nick back as soon as it is free: on servers with
+MONITOR (e.g. EFnet) the server reports the moment the nick goes offline;
+elsewhere (IRCnet) the bot checks with ISON every minute, and also
+retries on every server PING and whenever it sees the holder quit or
+change nick. On IRCnet a nick stays blocked for a while after its holder
+splits or quits (nick delay); the bot keeps trying until it gets it.
 
 IRCnet has no services, so nobody can register channels or op the bot
 for you. Op the bot by hand in each channel; it keeps auto-opping
 registered users from there. If the bot loses op (netsplit, kick), an op
 has to give it back.
+
+## Several networks
+
+One bot process can sit on several networks at once. Put the
+per-network settings under `networks:`; everything else stays at the top
+level, where identity and TLS settings (`nick`, `user`, `tls_min_version`,
+...) also act as defaults for every network:
+
+```yaml
+nick: ModeBot
+admins: [zphinx]
+networks:
+  IRCnet:
+    server: irc.example.net
+    network: IRCnet          # optional: refuse a server on another network
+    channels: ["#mychannel"]
+  EFnet:
+    server: irc.underworld.no  # one fixed server, not a round-robin name
+    network: EFnet
+    tls_self_signed: true      # EFnet servers use self-signed certificates
+    nick: ModeBot2             # override any identity or TLS setting
+    channels: ["#gunnit"]
+```
+
+Per network: `server`, `network`, `port`, the `tls_*` settings,
+`allow_insecure`, `require_secure_users`, `nick`, `alt_nicks`, `user`,
+`realname`, `umodes` and `channels`. The rest, including `admins`,
+`link_preview` and `plugins`, applies to every network.
+
+- **Accounts are shared.** An account (and admin status) works on every
+  network, but users IDENTIFY on each network separately.
+- **Channels belong to one network.** `#foo` on IRCnet and `#foo` on EFnet
+  are registered, owned and managed separately, on the network you send
+  the command on. Locally: `ircbot-account -n EFnet channel-register ...`
+  (or `ircbot-docker channel -n EFnet register ...`).
+- **Plugins** run separately on each network, with their data in
+  `data/plugins/<network>/`. `PLUGIN` commands act on the network they are
+  sent on; a config reload acts on all.
+- A config reload (`ircbot-docker reload`) connects to added networks and
+  leaves removed ones. A network that fails for good (e.g. a server on the
+  wrong network) stops on its own; the others keep running.
+- Logs are prefixed with the network, and `ircbot-docker status` shows
+  each one. The health check is only healthy when every network is
+  connected.
+- Without `networks:`, the config is one network as before. Channels
+  registered before networks existed move to the first network on the
+  first start; older versions of the bot can't read the data file after
+  that, so back it up first (`ircbot-docker backup`).
 
 **First start:** the names in `admins` are bot accounts. Connect with that
 nick over TLS and `/msg ModeBot REGISTER <password>` straight away so

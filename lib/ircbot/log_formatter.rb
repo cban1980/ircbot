@@ -5,8 +5,10 @@ module IRCBot
   # or web pages (e.g. ANSI escape sequences) cannot forge log lines or
   # manipulate the terminal of whoever reads the log.
   class LogFormatter
-    def call(severity, time, _progname, message)
+    # progname: the network, when the bot runs on several (see Supervisor).
+    def call(severity, time, progname, message)
       text = message.is_a?(Exception) ? "#{message.class}: #{message.message}" : message.to_s
+      text = "[#{progname}] #{text}" if progname
       "#{time.utc.iso8601(3)} #{severity.ljust(5)} #{escape(text)}\n"
     end
 
