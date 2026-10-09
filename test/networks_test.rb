@@ -8,8 +8,6 @@ class NetworksTest < Minitest::Test
     nick: ModeBot
     admins: [root]
     require_secure_users: false
-    link_preview:
-      enabled: false
     networks:
       IRCnet:
         server: irc.example.net

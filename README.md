@@ -53,7 +53,7 @@ networks:
 Per network: `server`, `network`, `port`, the `tls_*` settings,
 `allow_insecure`, `require_secure_users`, `nick`, `alt_nicks`, `user`,
 `realname`, `umodes` and `channels`. The rest, including `admins`,
-`link_preview` and `plugins`, applies to every network.
+`ctcp` and `plugins`, applies to every network.
 
 - **Accounts are shared.** An account (and admin status) works on every
   network, but users IDENTIFY on each network separately.
@@ -155,33 +155,38 @@ limits, log rotation, a health check (connected, with server activity in
 the last 10 minutes) and `--restart unless-stopped`. Config, data and
 secrets are excluded from the image (`.dockerignore`).
 
+## CTCP
+
+The bot answers CTCP `VERSION`, `PING`, `TIME` and `CLIENTINFO`
+(rate-limited like commands). Plugins can answer other CTCP commands or
+replace these answers.
+
+```yaml
+ctcp:
+  enabled: true                       # false: no built-in answers
+  version: "Linuks, a Ruby IRC bot"   # the VERSION answer
+```
+
 ## Link previews
 
-When someone posts a link in a channel, the bot replies in the channel:
+When someone posts a link, the bot says what it is:
 
 ```
 [YouTube] Me at the zoo · jawed
-[YouTube] Big Talk · Conf · 1:02:03 · 1.2M views     (with youtube_api_key)
+[GitHub] rails/rails: Ruby on Rails · ★56.1K · Ruby
+[Wikipedia] Ruby (programming language): Ruby is an interpreted, ...
 [example.com] Example Domain
-[ruby-lang.org] image/png, 5.2 KB
 ```
 
-- **YouTube** (`youtube.com/watch`, `youtu.be`, `/shorts/`, `/live/`,
-  `/embed/`, music and mobile hosts) uses YouTube's oEmbed endpoint, or
-  the Data API v3 when `youtube_api_key` is set, which adds duration (or
-  LIVE) and view count. YouTube pages themselves are never scraped.
-- **Web pages** show their `<title>` (or `og:title`); **other files** show
-  the content type and size from the response headers.
-- At most 3 links per message, 6 previews per channel and 3 per host per
-  minute, and the same link isn't repeated in a channel within 10
-  minutes. Fetches run on 2 background threads, so a slow site never
-  stalls the bot.
-- Previews are normal channel messages. Set `message_type: notice` to
-  send notices instead, which other bots by convention never answer; with
-  messages, put other link bots in `ignore_nicks` so two bots can't keep
-  previewing each other.
-- Configure under `link_preview:` (`enabled`, `message_type`, `channels`,
-  `ignore_nicks`, `youtube_api_key`).
+This is the `links` plugin
+([contrib/plugins/links.rb](contrib/plugins/links.rb)); install it with
+`bin/ircbot-docker plugin install contrib/plugins/links.rb` (new instances
+from `ircbot-docker init` have it already). It previews YouTube (with
+duration and views given an API key), Vimeo, GitHub, Wikipedia, Spotify,
+SoundCloud, Reddit, web page titles and file types, with settings for
+where and for whom it previews, output formats, per-channel settings and
+rate limits, plus `TITLE <url>` and `LINKS` commands. Everything is in
+**[docs/links.md](docs/links.md)**.
 
 ## Plugins
 
@@ -212,8 +217,12 @@ plugins:
     prefix: "!"          # also answer !roll in channels (quote it in YAML)
     private: true        # commands by /msg (default true)
     channels: ["#games"] # limit the channel commands (default: every channel)
+    networks: [IRCnet]   # only load it on these networks (default: all)
+    network_settings:    # per-network overrides
+      IRCnet:
+        prefix: "@"
     max_dice: 20         # anything else is the plugin's own setting
-  seen:
+  chanlog:
     enabled: false       # don't load it
 ```
 
@@ -226,7 +235,7 @@ the built-in ones; with `private: false` and a prefix, only in channels.
 ```ruby
 class Dice < IRCBot::Plugin
   description "Rolls dice"
-  defaults "sides" => 6                      # overridden by config.yml
+  setting "sides", default: 6, type: :integer, min: 2   # overridden by config.yml
 
   command "ROLL", usage: "ROLL [count]", help: "roll dice" do |ctx, args|
     count = (args.first || 1).to_i.clamp(1, 10)
@@ -239,32 +248,38 @@ class Dice < IRCBot::Plugin
 end
 ```
 
-- `command NAME, usage:, help:, admin:, identified:` with a block taking
-  `(ctx, args)`. `ctx.reply` answers in the channel (or by notice for a
-  private message), `ctx.reply_privately`, `ctx.nick`, `ctx.channel`,
-  `ctx.account` (identified bot account or nil), `ctx.admin?`,
-  `ctx.access_level`, `ctx.usage!`. `raise IRCBot::Error, "text"` sends
-  the text back to the user. Built-in command names can't be taken.
-- `on EVENT` with `:connected`, `:message` (channel messages), `:join`,
-  `:part`, `:kick`, `:quit`, `:nick` or `:line` (every line received,
-  except ones carrying a password command). The event has `nick`,
-  `userhost`, `channel`, `text`, `new_nick` and the parsed `message`.
-- `say`, `notice`, `action`, `bot_nick`, `channels`, `account_for(nick)`,
-  `admin?(account)`, `access_level(channel, account)`, `settings`, `log`.
-- `data` is the plugin's own JSON file (`data/plugins/<name>.json`):
-  `data["key"]`, `data["key"] = value`, `data.update { |hash| ... }`.
-- `setup` and `teardown` run on load and unload (and at shutdown);
-  `every(seconds) { ... }` and `after(seconds) { ... }` are timers that
-  stop on unload. `background { ... }` runs slow work, such as HTTP
-  requests, on a worker thread.
+The plugin API covers much more than commands:
+
+- **Commands** with aliases, admin/identified/channel-level requirements,
+  channel-only or private-only use and per-user cooldowns.
+- **Events** for messages, actions, notices, private messages, CTCP,
+  joins, parts, kicks, quits, nick changes, mode and topic changes,
+  invites, users identifying, the bot's own outgoing lines and every raw
+  line.
+- **Channel state:** who is in a channel with their op/voice status and
+  user@host, the topic and the channel modes.
+- **Actions:** messages, CTCP, join/part, modes, op/voice, kick, ban,
+  kickban, topic, invite and checked raw lines.
+- **Accounts and access:** who is identified as what, admins, registered
+  channels and their access lists.
+- **Several networks:** each network runs its own instance; plugins can
+  act on other networks, talk to each other (`publish`/`listen`) and share
+  state.
+- **Plumbing:** checked settings, JSON storage and a private folder,
+  timers, background jobs, guarded HTTP/JSON fetches, rate limits and
+  logging.
+
+The full reference is **[docs/plugins.md](docs/plugins.md)**. Examples in
+[contrib/plugins/](contrib/plugins/): `dice` (commands), `ops` (`!kick`, `!kb`, `!ban`, `!topic` for channel ops),
+`chanlog` (channel logs to files), `relay` (chat between channels on
+different networks) and `links` (link previews).
 
 Commands, hooks and timers run one at a time with the bot's IRC handling,
 so they must be quick; use `background` for anything that waits. An
 exception in a plugin is logged and never stops the bot. Plugin commands
-share the bot's command rate limits, and output is split on line breaks
-and cut to fit, so a plugin can't inject raw protocol lines. Only the
-standard library is available (the image has no gems). See
-[contrib/plugins/](contrib/plugins/) for two complete examples.
+share the bot's command rate limits, and output is checked and cut to
+fit, so a plugin can't inject raw protocol lines by accident. Only the
+standard library is available (the image has no gems).
 
 **Plugins are trusted code.** They run inside the bot with its full
 privileges, including access to the password pepper and hashes, so only
@@ -338,7 +353,8 @@ The URLs are attacker-controlled, so the fetcher (`SafeHttp`) is strict:
   Unicode direction overrides, and truncated, before it reaches IRC.
 
 Fetching a link reveals the bot's IP address to that site (and to
-YouTube/Google for videos).
+YouTube/Google, GitHub or Wikipedia for their links). The same client
+serves plugins' `http_get`.
 
 ### What it can't control
 

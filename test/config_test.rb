@@ -53,10 +53,17 @@ class ConfigTest < Minitest::Test
     assert_raises(IRCBot::ConfigError) { load("server: irc.example.net\ntls_self_signed: \"yes please\"\n") }
   end
 
-  def test_link_preview_message_type
-    assert_equal "privmsg", load("server: irc.example.net\n")["link_preview"]["message_type"]
-    assert_equal "notice", load("server: irc.example.net\nlink_preview: { message_type: NOTICE }\n")["link_preview"]["message_type"]
-    assert_raises(IRCBot::ConfigError) { load("server: irc.example.net\nlink_preview: { message_type: shout }\n") }
+  def test_old_link_preview_section_explains_the_plugin
+    error = assert_raises(IRCBot::ConfigError) { load("server: irc.example.net\nlink_preview: { enabled: true }\n") }
+    assert_match(/now the "links" plugin/, error.message)
+  end
+
+  def test_secrets_in_plugin_settings_need_a_private_file
+    File.write(@path, "server: irc.example.net\nplugins:\n  links:\n    youtube_api_key: abc\n", perm: 0o644)
+    assert_raises(IRCBot::ConfigError) { IRCBot::Config.load(@path) }.then { |e| assert_match(/chmod 600/, e.message) }
+
+    File.chmod(0o600, @path)
+    assert IRCBot::Config.load(@path)
   end
 
   def test_identity_settings

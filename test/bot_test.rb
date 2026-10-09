@@ -3,14 +3,6 @@ require "test_helper"
 class BotTest < Minitest::Test
   include StoreHelper
 
-  # Runs preview jobs immediately instead of on worker threads.
-  class InlinePool
-    def submit
-      yield
-      true
-    end
-  end
-
   def setup
     super
     @now = 0
@@ -23,16 +15,8 @@ class BotTest < Minitest::Test
       "server" => "irc.example.net", "nick" => "ModeBot", "admins" => ["root"], "channels" => ["#home"],
       "status_file" => File.join(@tmpdir, "status.json")
     ).merge(overrides)
-    @previewed = []
-    previewer = Object.new
-    previewed = @previewed
-    previewer.define_singleton_method(:preview) do |url|
-      previewed << url
-      "[example.com] Title of #{url}"
-    end
     @bot = IRCBot::Bot.new(config, connection: @conn, store: @store, hasher: TEST_HASHER,
-                                   clock: -> { @now }, previewer: previewer, preview_pool: InlinePool.new,
-                                   logger: Logger.new(nil))
+                                   clock: -> { @now }, logger: Logger.new(nil))
     @bot.handle(":server 001 ModeBot :Welcome")
     @bot.handle(":ModeBot!bot@host JOIN #chan")
     @conn.clear
@@ -607,80 +591,6 @@ class BotTest < Minitest::Test
     @bot.handle(":alice!a@h PRIVMSG #chan :hello")
 
     assert_empty @conn.lines
-  end
-
-  # --- link previews -------------------------------------------------------------
-
-  def chat(nick, text, channel: "#chan", host: "#{nick}@#{nick}.host")
-    @bot.handle(":#{nick}!#{host} PRIVMSG #{channel} :#{text}")
-  end
-
-  def test_previews_links_as_channel_notice
-    chat("alice", "look https://youtu.be/dQw4w9WgXcQ!")
-
-    assert_equal ["PRIVMSG #chan :[example.com] Title of https://youtu.be/dQw4w9WgXcQ"], @conn.lines
-  end
-
-  def test_previews_as_notice_when_configured
-    build_bot("link_preview" => { "message_type" => "notice" })
-    chat("alice", "https://example.com/a")
-
-    assert_equal ["NOTICE #chan :[example.com] Title of https://example.com/a"], @conn.lines
-  end
-
-  def test_ignores_its_own_messages
-    chat("ModeBot", "https://example.com/a", host: "bot@host")
-
-    assert_empty @previewed
-  end
-
-  def test_at_most_three_links_per_message
-    chat("alice", (1..5).map { |i| "https://example.com/#{i}" }.join(" "))
-
-    assert_equal 3, @previewed.size
-  end
-
-  def test_same_link_not_repeated_within_ten_minutes
-    chat("alice", "https://example.com/a")
-    chat("bob", "https://example.com/a")
-    assert_equal 1, @previewed.size
-
-    chat("bob", "https://example.com/a", channel: "#other")
-    assert_equal 2, @previewed.size, "other channels get their own preview"
-
-    @now += IRCBot::Bot::PREVIEW_REPEAT_WINDOW + 1
-    chat("bob", "https://example.com/a")
-    assert_equal 3, @previewed.size
-  end
-
-  def test_per_host_and_per_channel_limits
-    5.times { |i| chat("alice", "https://example.com/#{i}") }
-    assert_equal IRCBot::Bot::PREVIEW_PER_HOST, @previewed.size
-
-    %w[b c d e].each { |n| chat(n, "https://example.com/#{n}", host: "#{n}@#{n}.example") }
-    assert_equal IRCBot::Bot::PREVIEW_PER_CHANNEL, @previewed.size
-
-    @now += 61
-    chat("bob", "https://example.com/later", host: "bob@bob.example")
-    assert_equal IRCBot::Bot::PREVIEW_PER_CHANNEL + 1, @previewed.size
-  end
-
-  def test_preview_respects_ignore_list_channels_and_disable
-    build_bot("link_preview" => { "ignore_nicks" => ["OtherBot"], "channels" => ["#chan"] })
-    chat("otherbot", "https://example.com/a")
-    chat("alice", "https://example.com/b", channel: "#elsewhere")
-    assert_empty @previewed
-
-    build_bot("link_preview" => { "enabled" => false })
-    chat("alice", "https://example.com/c")
-    assert_empty @previewed
-  end
-
-  def test_no_preview_for_private_messages_or_ctcp
-    say("alice", "https://example.com/a")
-    chat("alice", "\x01ACTION likes https://example.com/b\x01")
-
-    assert_empty @previewed
   end
 
   def test_replies_never_echo_passwords

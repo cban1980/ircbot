@@ -89,7 +89,7 @@ module IRCBot
     end
 
     def login(nick, userhost, account)
-      @sessions[key(nick)] = { account: account, userhost: userhost, epoch: epoch(account), at: @clock.call }
+      @sessions[key(nick)] = { nick: nick, account: account, userhost: userhost, epoch: epoch(account), at: @clock.call }
     end
 
     def logout(nick)
@@ -98,7 +98,7 @@ module IRCBot
 
     def rename(old_nick, new_nick)
       session = @sessions.delete(key(old_nick))
-      @sessions[key(new_nick)] = session if session
+      @sessions[key(new_nick)] = session.merge(nick: new_nick) if session
     end
 
     # The account a nick is identified to, or nil. Sessions from another
@@ -117,6 +117,11 @@ module IRCBot
     # Only use this where a stale answer errs on the safe side.
     def session_account(nick)
       @sessions.dig(key(nick), :account)
+    end
+
+    # [[nick, account], ...] of current, valid sessions.
+    def identified
+      @sessions.values.select { |session| valid?(session, session[:userhost]) }.map { |s| [s[:nick], s[:account]] }
     end
 
     def clear_sessions

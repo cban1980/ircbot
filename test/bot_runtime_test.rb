@@ -8,8 +8,6 @@ class BotRuntimeTest < Minitest::Test
     server: irc.example.net
     nick: ModeBot
     channels: ["#home"]
-    link_preview:
-      enabled: false
   YAML
 
   def setup

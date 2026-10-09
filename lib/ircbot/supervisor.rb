@@ -31,6 +31,9 @@ module IRCBot
 
     def bot(network) = @mutex.synchronize { @bots[key(network)] }
 
+    # Network names in config order.
+    def network_ids = @config["networks"].map { |net| net["id"] }
+
     # Runs until stopped. A network that fails for good (e.g. the server is
     # on the wrong network) stops alone; if every network has failed, the
     # errors are raised as a ConfigError.
@@ -87,7 +90,7 @@ module IRCBot
       logger = @log.dup
       logger.progname = net["id"] if @config["networks"].size > 1 || net["id"] != Config::DEFAULT_NETWORK
       bot = Bot.new(net, connection: @connection_factory&.call(net), store: @store, hasher: @hasher,
-                         config_path: @config_path, logger: logger,
+                         config_path: @config_path, logger: logger, supervisor: self,
                          status_sink: ->(_network, status) { update_status(bot, status) })
     end
 

@@ -49,14 +49,22 @@ module IRCBot
       @max_bytes = max_bytes
     end
 
+    # Request headers callers may not set: the client sets or guards them.
+    RESERVED_HEADERS = %w[host accept accept-encoding user-agent content-length connection transfer-encoding].freeze
+
     # Fetches url. The body is only read when the content type matches
-    # body_types; otherwise only status and headers are returned.
-    def get(url, body_types: %r{\A(?:text/html|application/xhtml\+xml)\z}, accept: "text/html")
+    # body_types; otherwise only status and headers are returned. headers
+    # (e.g. an API token) are sent only to the URL's own host, never to a
+    # host a redirect leads to.
+    def get(url, body_types: %r{\A(?:text/html|application/xhtml\+xml)\z}, accept: "text/html", headers: {})
       deadline = now + DEADLINE
       uri = check_uri(url)
+      headers = check_headers(headers)
+      origin = uri.hostname
       Timeout.timeout(DEADLINE + IO_TIMEOUT, Refused, "fetch took too long") do
         (MAX_REDIRECTS + 1).times do
-          response, location = fetch_once(uri, body_types, accept, deadline)
+          extra = uri.hostname == origin ? headers : {}
+          response, location = fetch_once(uri, body_types, accept, deadline, extra)
           return response unless location
 
           uri = check_uri(URI.join(uri.to_s, location).to_s)
@@ -93,7 +101,19 @@ module IRCBot
 
     private
 
-    def fetch_once(uri, body_types, accept, deadline)
+    def check_headers(headers)
+      headers.to_h do |name, value|
+        name = name.to_s
+        value = value.to_s
+        raise ArgumentError, "invalid header name #{name.inspect}" unless name.match?(/\A[A-Za-z0-9-]{1,64}\z/)
+        raise ArgumentError, "header #{name} can't be set" if RESERVED_HEADERS.include?(name.downcase)
+        raise ArgumentError, "invalid value for header #{name}" if value.match?(/[\r\n\0]/) || value.bytesize > 1024
+
+        [name, value]
+      end
+    end
+
+    def fetch_once(uri, body_types, accept, deadline, headers = {})
       http = Net::HTTP.new(uri.hostname, uri.port, nil) # nil: never use a proxy from ENV
       http.ipaddr = vetted_address(uri.hostname)
       http.use_ssl = uri.scheme == "https"
@@ -107,6 +127,7 @@ module IRCBot
       request["User-Agent"] = @user_agent
       request["Accept"] = accept
       request["Accept-Encoding"] = "identity"
+      headers.each { |name, value| request[name] = value }
 
       response = location = nil
       body = String.new(encoding: Encoding::BINARY)

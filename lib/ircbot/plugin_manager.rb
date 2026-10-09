@@ -24,6 +24,7 @@ module IRCBot
       @held = []           # unloaded with PLUGIN UNLOAD; skipped by sync until loaded again
       @dir = nil
       @config = {}
+      @cooldowns = {}      # seconds => RateLimiter
     end
 
     # Syntax-checks the plugin files without running them, for --check.
@@ -104,6 +105,7 @@ module IRCBot
       @held |= [name] if hold
       entry.plugin.safely("teardown") { entry.plugin.teardown }
       entry.plugin.stop!
+      @host.plugin_unloaded(name) unless reloading?(name)
       @log.info("Plugin #{name} unloaded") unless quiet
     end
 
@@ -140,13 +142,18 @@ module IRCBot
     def run(invocation, nick:, userhost:, channel: nil)
       plugin = invocation.entry.plugin
       command = invocation.command
+      args = invocation.args
+      target_channel = channel
+      # A level command by private message names its channel first.
+      if command.level && channel.nil? && args.first.to_s.match?(Channels::NAME)
+        target_channel, *args = args
+      end
       ctx = Plugin::Context.new(plugin: plugin, nick: nick, userhost: userhost, channel: channel,
-                                command: command, prefix: invocation.prefix)
+                                command: command, prefix: invocation.prefix, args: args,
+                                target_channel: target_channel)
       begin
-        raise Error, "You must IDENTIFY first." if command.identified && !ctx.account
-        raise Error, "Only bot admins can use that." if command.admin && !ctx.admin?
-
-        plugin.instance_exec(ctx, invocation.args, &command.handler)
+        check_invocation!(ctx, command, channel, target_channel)
+        plugin.instance_exec(ctx, args, &command.handler)
       rescue Error => e
         ctx.reply_privately(e.message)
       rescue StandardError => e
@@ -161,10 +168,43 @@ module IRCBot
       @loaded.each_value do |entry|
         hooks = entry.plugin.class.hooks[type] or next
 
-        event ||= Plugin::Event.new(type: type, **fields)
+        event ||= Plugin::Event.new(type: type, network: @host.network, **fields)
         hooks.each { |hook| entry.plugin.safely("#{type} hook") { entry.plugin.instance_exec(event, &hook) } }
       end
     end
+
+    # The first plugin answer to a CTCP request (text), or nil.
+    def answer_ctcp(command, **fields)
+      event = Plugin::Event.new(type: :ctcp, network: @host.network, ctcp: command, **fields)
+      @loaded.each_value do |entry|
+        handler = entry.plugin.class.ctcp_handlers[command] or next
+
+        answer = entry.plugin.safely("CTCP #{command} handler") { entry.plugin.instance_exec(event, &handler) }
+        return answer.to_s if answer
+      end
+      nil
+    end
+
+    # CTCP commands plugins answer, for CLIENTINFO.
+    def ctcp_commands = @loaded.values.flat_map { |entry| entry.plugin.class.ctcp_handlers.keys }.uniq
+
+    # Hands a published message to the plugins listening for its topic,
+    # except the sender itself. Returns how many listeners got it.
+    def deliver(topic, payload, from:, network:)
+      info = { plugin: from, network: network }.freeze
+      @loaded.values.sum do |entry|
+        next 0 if entry.name == from && network == @host.network
+
+        handlers = entry.plugin.class.listeners[topic] or next 0
+        handlers.each do |handler|
+          entry.plugin.safely("listener for #{topic}") { entry.plugin.instance_exec(payload, info, &handler) }
+        end
+        handlers.size
+      end
+    end
+
+    # A loaded plugin instance, or nil.
+    def plugin(name) = @loaded[name]&.plugin
 
     # --- listing ------------------------------------------------------------------------
 
@@ -172,12 +212,18 @@ module IRCBot
     def help_lines(admin:)
       lines = @loaded.values.flat_map do |entry|
         options = entry_settings(entry)
-        entry.plugin.class.commands.values.filter_map do |command|
+        entry.plugin.class.commands.values.uniq.filter_map do |command|
           next if command.admin && !admin
 
-          where = options["private"] ? command.usage : "#{options['prefix']}#{command.usage}"
+          in_private = options["private"] && command.where != :channel
+          in_channel = options["prefix"] && command.where != :private
+          next unless in_private || in_channel
+
+          where = in_private ? command.usage : "#{options['prefix']}#{command.usage}"
           notes = [command.help]
-          notes << "(also #{options['prefix']}#{command.name.downcase} in channels)" if options["private"] && options["prefix"]
+          notes << "(also #{options['prefix']}#{command.name.downcase} in channels)" if in_private && in_channel
+          notes << "(aliases: #{command.aliases.join(', ')})" if command.aliases.any?
+          notes << "(#{command.level} and above)" if command.level
           notes << "(bot admins only)" if command.admin
           "  #{where.ljust(33)} #{notes.reject(&:empty?).join(' ')}"
         end
@@ -194,7 +240,7 @@ module IRCBot
         info = if entry
                  options = entry_settings(entry)
                  { "state" => "loaded", "description" => entry.plugin.class.description,
-                   "commands" => entry.plugin.class.commands.keys,
+                   "commands" => entry.plugin.class.commands.values.uniq.map(&:name),
                    "private" => options["private"], "prefix" => options["prefix"],
                    "error" => @errors[name] }.compact
                elsif @errors.key?(name) then { "state" => "error", "error" => @errors[name] }
@@ -221,6 +267,40 @@ module IRCBot
 
     def enabled?(name) = @config.dig(name, "enabled") != false
 
+    def reloading?(name) = @reloading == name
+
+    # Raises Error (sent to the user) unless the invocation is allowed.
+    def check_invocation!(ctx, command, channel, target_channel)
+      raise Error, "#{command.name} only works in channels." if command.where == :channel && channel.nil?
+      raise Error, "#{command.name} only works by private message." if command.where == :private && channel
+      raise Error, "You must IDENTIFY first." if command.identified && !ctx.account
+      raise Error, "Only bot admins can use that." if command.admin && !ctx.admin?
+      if command.level
+        ctx.usage! unless target_channel
+        if Channels.rank(ctx.access_level(target_channel)) < Channels.rank(command.level)
+          raise Error, "You need #{command.level} access on #{target_channel} for that."
+        end
+      end
+      check_cooldown!(command, ctx) if command.cooldown
+    end
+
+    def check_cooldown!(command, ctx)
+      limiter = (@cooldowns[command.cooldown] ||= RateLimiter.new(window: command.cooldown))
+      key = "#{command.name}:#{ctx.userhost.to_s.split('@', 2).last.to_s.downcase}"
+      if (wait = limiter.blocked_for(key, limit: 1))
+        raise Error, "Please wait #{wait} second#{'s' unless wait == 1} before using #{command.name} again."
+      end
+
+      limiter.hit(key)
+    end
+
+    # The plugin's logger: the bot's, with lines marked network/plugin.
+    def plugin_logger(name)
+      logger = @log.dup
+      logger.progname = [@log.progname, name].compact.join("/")
+      logger
+    end
+
     def entry_settings(entry) = Config::PLUGIN_DEFAULTS.merge(entry.config || {})
 
     # The plugin's own settings: its config section minus the bot's options.
@@ -236,9 +316,16 @@ module IRCBot
       source = self.class.read_file(path)
       klass = evaluate(path, source)
       check_commands!(name, klass)
-      plugin = klass.new(name: name, settings: settings_for(name), host: @host, logger: @log)
+      plugin = klass.new(name: name, settings: settings_for(name), host: @host, logger: plugin_logger(name))
       reloading = @loaded.key?(name)
-      unload(name, quiet: true) if reloading
+      if reloading
+        @reloading = name # keeps the channels it joined
+        begin
+          unload(name, quiet: true)
+        ensure
+          @reloading = nil
+        end
+      end
       @held.delete(name)
       begin
         plugin.setup
@@ -267,6 +354,10 @@ module IRCBot
     end
 
     def check_commands!(name, klass)
+      klass.ctcp_handlers.each_key do |ctcp|
+        other = @loaded.values.find { |e| e.name != name && e.plugin.class.ctcp_handlers.key?(ctcp) }
+        raise Error, "CTCP #{ctcp} is already answered by plugin #{other.name}" if other
+      end
       klass.commands.each_key do |command|
         raise Error, "command #{command} is a built-in command" if @reserved.include?(command)
 
@@ -276,7 +367,7 @@ module IRCBot
     end
 
     def commands_note(klass)
-      klass.commands.empty? ? "" : " (commands: #{klass.commands.keys.join(', ')})"
+      klass.commands.empty? ? "" : " (commands: #{klass.commands.values.uniq.map(&:name).join(', ')})"
     end
   end
 end

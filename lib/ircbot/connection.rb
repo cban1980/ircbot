@@ -104,7 +104,7 @@ module IRCBot
       end
     end
 
-    # Thread-safe: worker threads send link previews through here too.
+    # Thread-safe: plugins' worker threads send through here too.
     def write(line)
       @write_lock.synchronize do
         socket = @socket or raise IOError, "not connected"

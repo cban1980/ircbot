@@ -16,6 +16,14 @@ class FakeConnection
   def first_use? = false
 end
 
+# Runs worker-pool jobs immediately instead of on worker threads.
+class InlinePool
+  def submit
+    yield
+    true
+  end
+end
+
 module StoreHelper
   def setup
     @tmpdir = Dir.mktmpdir("ircbot-test")

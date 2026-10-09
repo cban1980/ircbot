@@ -26,6 +26,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 COPY Rakefile ./
 COPY test/ test/
+COPY contrib/plugins/ contrib/plugins/
 RUN chmod -R u=rwX,go=rX /app
 CMD ["rake", "test"]
 

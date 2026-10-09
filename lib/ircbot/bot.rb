@@ -63,13 +63,9 @@ module IRCBot
     REGISTER_WINDOW = 60 * 60
     REGISTER_LIMIT = 3
 
-    # Link previews: URLs looked at per message, previews per minute per
-    # channel and per host, and how long the same URL is not repeated.
-    PREVIEW_URLS_PER_MESSAGE = 3
-    PREVIEW_PER_CHANNEL = 6
-    PREVIEW_PER_HOST = 3
-    PREVIEW_REPEAT_WINDOW = 10 * 60
-    PREVIEW_USER_AGENT = "Mozilla/5.0 (compatible; ircbot link preview)".freeze
+    # IRC formatting codes, other control characters, and bidirectional
+    # overrides that could disguise text; removed from replies.
+    UNSAFE_CHARS = /[\x00-\x1f\x7f\u0080-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/
 
     # Commands (private messages) per 30 seconds, per host and in total.
     # Over the limit, the bot stays silent so it can't be used to flood.
@@ -83,17 +79,28 @@ module IRCBot
     # Servers with MONITOR also report it the moment it is.
     NICK_CHECK_INTERVAL = 60
 
-    attr_reader :nick, :network_id
+    attr_reader :nick, :network_id, :isupport
+
+    # Channels the bot is in, as of its last status update; safe to read
+    # from other threads (Plugin::Remote).
+    attr_reader :channel_snapshot
 
     # config: one network's flat config (see Config.network); a whole loaded
     # config means its first network. status_sink: called with (network,
     # status hash) instead of writing the status file (see Supervisor).
-    def initialize(config, connection: nil, store: nil, hasher: nil, clock: nil, previewer: nil,
-                   preview_pool: nil, config_path: nil, status_sink: nil, logger: Logger.new($stdout))
+    # http and plugin_pool replace the plugins' HTTP client and worker
+    # threads (for tests).
+    def initialize(config, connection: nil, store: nil, hasher: nil, clock: nil, http: nil, plugin_pool: nil,
+                   config_path: nil, status_sink: nil, supervisor: nil, logger: Logger.new($stdout))
       config = Config.network(config)
       @config = config
       @network_id = config["id"] || Config::DEFAULT_NETWORK
       @status_sink = status_sink
+      @supervisor = supervisor # the other networks, for plugins
+      @isupport = ISupport.new
+      @plugin_channels = {}    # plugin name => channels it joined
+      @channel_snapshot = [].freeze
+      @remote_lock = Mutex.new
       @config_path = config_path # enables reloading on SIGHUP
       @log = logger
       @own_connection = connection.nil? # rebuilt when connection settings change
@@ -113,7 +120,8 @@ module IRCBot
       @command_limiter = RateLimiter.new(window: COMMAND_WINDOW, clock: @clock)
       @secure_users = {}  # nick key => userhost confirmed as using TLS
       @pending_whois = {} # nick key => secret command waiting for a TLS check
-      setup_link_preview(previewer, preview_pool)
+      @plugin_http = http
+      @plugin_pool = plugin_pool
       @nick = config["nick"]
       @nick_attempts = 0
       @welcomed = false
@@ -123,6 +131,18 @@ module IRCBot
 
     # (run, signal handling, config reload and the status file are in
     # bot_runtime.rb; plugin support is in bot_plugins.rb)
+
+    def connected? = @welcomed
+
+    # Runs the block on this bot's turn, from another network's plugin
+    # (Plugin::Remote, publish everywhere). Jobs run in order on one thread.
+    # Returns false if the queue is full.
+    def queue_remote(&job)
+      @remote_lock.synchronize do
+        @remote_queue ||= WorkerPool.new(size: 1, max_queue: 500, logger: @log)
+        @remote_queue.submit { @lock.synchronize(&job) }
+      end
+    end
 
     # Handles one line from the server. Nothing a remote party sends may
     # crash the bot: unexpected errors are logged and the line is dropped.
@@ -140,6 +160,7 @@ module IRCBot
     private
 
     def dispatch_line(msg)
+      @roster.note_userhost(msg.nick, msg.userhost) if msg.userhost
       case msg.command
       when "PING" then on_ping(msg)
       when "001" then on_welcome(msg)
@@ -149,7 +170,12 @@ module IRCBot
       when "731" then on_monitor_offline(msg)
       # 432 erroneous, 433 in use, 437 unavailable (IRCnet nick delay)
       when "432", "433", "437" then on_nick_rejected
-      when "353" then @roster.add_names(msg.params[2], msg.params[3].to_s.split)
+      when "353" then @roster.add_names(msg.params[2], msg.params[3].to_s.split, @isupport.prefixes.invert)
+      when "324" then on_channel_modes(msg)
+      when "332" then @roster.set_topic(msg.params[1], msg.params[2])
+      when "333" then @roster.set_topic_origin(msg.params[1], msg.params[2], msg.params[3].to_i)
+      when "MODE" then on_mode(msg)
+      when "TOPIC" then @roster.set_topic(msg.params[0], msg.params[1], by: msg.nick, at: Time.now.to_i)
       when "311" then on_whois_user(msg)
       when "320", "671" then on_whois_secure(msg)
       when "318" then on_end_of_whois(msg)
@@ -178,6 +204,7 @@ module IRCBot
       @nick_attempts = 0
       @monitor_supported = false
       @monitoring = false
+      @isupport.clear
       @roster.clear
       @accounts.clear_sessions
       @secure_users.clear
@@ -196,7 +223,8 @@ module IRCBot
     # has confirmed the network name (ISUPPORT NETWORK=...).
     def on_isupport(msg)
       tokens = msg.params[1..-2].to_a
-      @monitor_supported ||= tokens.any? { |param| param == "MONITOR" || param.start_with?("MONITOR=") }
+      @isupport.update(tokens)
+      @monitor_supported ||= @isupport.key?("MONITOR")
       token = tokens.find { |param| param.start_with?("NETWORK=") } or return
 
       actual = token.delete_prefix("NETWORK=")
@@ -224,7 +252,7 @@ module IRCBot
       return if @joined
 
       @joined = true
-      channels = @config["channels"] + @channels.names
+      channels = @config["channels"] + @channels.names + plugin_channel_names
       channels.uniq { |c| Casemap.downcase(c) }.each { |c| send_raw("JOIN #{c}") }
     end
 
@@ -283,8 +311,11 @@ module IRCBot
 
     def on_join(msg)
       channel = msg.params[0]
-      @roster.join(channel, msg.nick)
-      return write_status if self?(msg.nick)
+      @roster.join(channel, msg.nick, msg.userhost)
+      if self?(msg.nick)
+        send_raw("MODE #{channel}") # learn the channel modes (324)
+        return write_status
+      end
       return unless @channels.registered?(channel)
 
       # The higher of the identified account's level and any matching mask.
@@ -298,6 +329,33 @@ module IRCBot
         set_mode(channel, "+#{Channels::MODES[account_level]}", msg.nick)
       end
     end
+
+    # Keeps the roster's status modes and channel modes current.
+    def on_mode(msg)
+      channel = msg.params[0]
+      return unless @isupport.channel?(channel)
+
+      lists = @isupport.chanmode_groups.first
+      status = @isupport.prefixes.keys
+      mode_changes(msg).each do |change|
+        if status.include?(change.mode)
+          @roster.set_member_mode(channel, change.param, change.mode, change.set) if change.param
+        elsif !lists.include?(change.mode)
+          @roster.set_channel_mode(channel, change.mode, change.set, change.param)
+        end
+      end
+    end
+
+    # RPL_CHANNELMODEIS: me, channel, modes, parameters...
+    def on_channel_modes(msg)
+      _me, channel, modes, *params = msg.params
+      @roster.reset_channel_modes(channel)
+      @isupport.parse_modes(modes, params).each do |change|
+        @roster.set_channel_mode(channel, change.mode, change.set, change.param)
+      end
+    end
+
+    def mode_changes(msg) = @isupport.parse_modes(msg.params[1], msg.params[2..] || [])
 
     def on_part(channel, nick)
       return @roster.part(channel, nick) unless self?(nick)
@@ -386,13 +444,13 @@ module IRCBot
         return warn_public_secret(msg.nick, target)
       end
       if channel?(target)
+        return handle_ctcp(msg, target, text) if text.start_with?("\x01") # actions are left to plugins
         return if plugin_channel_command(msg, target, text)
 
-        @plugins.emit(:message, nick: msg.nick, userhost: msg.userhost, channel: target, text: text, message: msg)
-        return preview_links(msg, target, text)
+        return @plugins.emit(:message, nick: msg.nick, userhost: msg.userhost, channel: target, text: text, message: msg)
       end
       return unless self?(target)
-      return if text.start_with?("\x01") # ignore CTCP
+      return handle_ctcp(msg, target, text) if text.start_with?("\x01")
 
       name, *args = text.strip.split
       return unless name
@@ -454,6 +512,7 @@ module IRCBot
       @accounts.login(ctx.nick, ctx.userhost, account)
       @log.info("Account registered: #{account} by #{ctx.nick}!#{ctx.userhost}")
       reply(ctx, "Account #{account} registered. You are now identified.")
+      @plugins.emit(:identified, nick: ctx.nick, userhost: ctx.userhost, account: account)
     end
 
     def cmd_identify(ctx, _command, args)
@@ -463,12 +522,14 @@ module IRCBot
       @accounts.login(ctx.nick, ctx.userhost, account)
       reply(ctx, "You are now identified as #{account}.")
       apply_modes(ctx.nick, account)
+      @plugins.emit(:identified, nick: ctx.nick, userhost: ctx.userhost, account: account)
     end
 
     def cmd_logout(ctx, _command, _args)
-      require_account(ctx)
+      account = require_account(ctx)
       @accounts.logout(ctx.nick)
       reply(ctx, "You are now logged out.")
+      @plugins.emit(:logout, nick: ctx.nick, userhost: ctx.userhost, account: account)
     end
 
     def cmd_password(ctx, _command, args)
@@ -610,59 +671,7 @@ module IRCBot
       set_mode(channel, mode, target)
     end
 
-    # --- link previews ---------------------------------------------------------
-
-    # Also called on config reload; injected previewer/pool are kept.
-    def setup_link_preview(previewer = @injected_previewer, pool = @preview_pool)
-      @injected_previewer = previewer
-      @preview_config = Config::LINK_PREVIEW_DEFAULTS.merge(@config["link_preview"] || {})
-      @preview_seen ||= RateLimiter.new(window: PREVIEW_REPEAT_WINDOW, clock: @clock)
-      @preview_limiter ||= RateLimiter.new(window: 60, clock: @clock)
-      @previewer = nil
-      return unless @preview_config["enabled"]
-
-      @previewer = previewer || LinkPreview.new(
-        http: SafeHttp.new(user_agent: PREVIEW_USER_AGENT),
-        youtube_api_key: @preview_config["youtube_api_key"],
-        logger: @log
-      )
-      @preview_pool = pool || WorkerPool.new(size: 2, max_queue: 20, logger: @log)
-    end
-
-    # Fetches previews in the background and posts them to the channel as
-    # normal messages (link_preview.message_type: privmsg, the default) or
-    # notices ("notice", which other bots conventionally never answer).
-    def preview_links(msg, channel, text)
-      return unless @previewer && preview_channel?(channel)
-      return if self?(msg.nick) || text.start_with?("\x01")
-      return if @preview_config["ignore_nicks"].any? { |nick| Casemap.eq?(nick, msg.nick) }
-
-      chan_key = "chan:#{key(channel)}"
-      host_key = "host:#{host_of(msg.userhost)}"
-      LinkPreview.extract_urls(text, limit: PREVIEW_URLS_PER_MESSAGE).each do |url|
-        seen_key = "#{key(channel)} #{url}"
-        next if @preview_seen.blocked_for(seen_key, limit: 1)
-        break if @preview_limiter.blocked_for(chan_key, limit: PREVIEW_PER_CHANNEL)
-        break if @preview_limiter.blocked_for(host_key, limit: PREVIEW_PER_HOST)
-
-        [chan_key, host_key].each { |limit_key| @preview_limiter.hit(limit_key) }
-        @preview_seen.hit(seen_key)
-        queued = @preview_pool.submit do
-          line = @previewer.preview(url)
-          send_raw("#{preview_command} #{channel} :#{line}") if line
-        end
-        @log.warn("Link preview queue full; skipped #{url}") unless queued
-      end
-    end
-
-    def preview_command
-      @preview_config["message_type"] == "notice" ? "NOTICE" : "PRIVMSG"
-    end
-
-    def preview_channel?(channel)
-      allowed = @preview_config["channels"]
-      allowed.empty? || allowed.any? { |c| Casemap.eq?(c, channel) }
-    end
+    # --- warnings -------------------------------------------------------------
 
     # Someone typed a password command into a channel instead of a query.
     def warn_public_secret(nick, channel)
@@ -776,12 +785,13 @@ module IRCBot
     # Replies can echo user input (channel or account names), so control
     # and formatting characters are removed first.
     def reply(ctx, text)
-      send_raw("NOTICE #{ctx.nick} :#{text.gsub(LinkPreview::UNSAFE_CHARS, '')}")
+      send_raw("NOTICE #{ctx.nick} :#{text.gsub(UNSAFE_CHARS, '')}")
     end
 
     def send_raw(line)
       @log.debug(">> #{redact(line)}")
       @conn.write(line)
+      notify_outgoing(line)
     end
 
     def self?(nick) = Casemap.eq?(nick, @nick)

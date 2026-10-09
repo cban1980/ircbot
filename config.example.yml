@@ -76,28 +76,19 @@ admins:
 channels:
   - "#mychannel"
 
-# --- Link previews ---------------------------------------------------------
-# Links posted in channels get a one-line reply: YouTube title/channel
-# (plus duration and views with an API key), web page titles, or the
-# content type and size for other files.
-link_preview:
+# --- CTCP ----------------------------------------------------------------------
+# The bot answers CTCP VERSION, PING, TIME and CLIENTINFO. Plugins can
+# answer other CTCP commands (see docs/plugins.md).
+ctcp:
   enabled: true
-  # "privmsg": a normal channel message (default). "notice": a notice,
-  # which other bots by convention never respond to.
-  message_type: privmsg
-  # Limit to these channels; empty means every channel the bot is in.
-  channels: []
-  # Never preview links from these nicks (e.g. other bots).
-  ignore_nicks: []
-  # Optional YouTube Data API v3 key, for duration and view counts.
-  # Prefer IRCBOT_YOUTUBE_API_KEY in the environment.
-  youtube_api_key:
+  version: "ircbot (Ruby)"
 
 # --- Plugins -----------------------------------------------------------------
 # Ruby files in plugins_dir (one plugin per file, e.g. plugins/dice.rb;
 # examples in contrib/plugins/). Reloading the config ("ircbot-docker
 # reload") loads new files and reloads changed ones without reconnecting.
 # Plugins run with the bot's full privileges: only install code you trust.
+# Writing plugins: docs/plugins.md.
 plugins_dir: plugins
 
 # Optional settings per plugin, keyed by file name. Every plugin file is
@@ -106,8 +97,15 @@ plugins_dir: plugins
 #   private:  commands work by private message, /msg ModeBot ROLL (default true)
 #   prefix:   e.g. "!" (quoted) to also accept !roll in channels (default: none)
 #   channels: limit those channel commands to these channels (default: all)
+#   networks: load it only on these networks (default: all)
+#   network_settings: per-network overrides, e.g. EFnet: { prefix: "@" }
 # Any other keys are the plugin's own settings.
 plugins:
+  # Link previews (contrib/plugins/links.rb; all settings in docs/links.md):
+  # links:
+  #   message_type: privmsg   # or notice, which other bots never answer
+  #   ignore_nicks: []        # e.g. other bots
+  #   youtube_api_key:        # duration and views; or IRCBOT_YOUTUBE_API_KEY
   # dice:
   #   prefix: "!"
   #   max_dice: 20
@@ -116,7 +114,7 @@ plugins:
 # To be on several networks at once, move server, network, tls_fingerprint
 # and channels into a section per network. Any identity or TLS setting
 # above can also be overridden per network; the others (admins, storage,
-# link_preview, plugins) apply to all. Accounts are shared by all networks;
+# ctcp, plugins) apply to all. Accounts are shared by all networks;
 # channels are registered per network.
 # networks:
 #   IRCnet:

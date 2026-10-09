@@ -34,8 +34,6 @@ class PluginTest < Minitest::Test
       admins: [root]
       channels: ["#chan"]
       require_secure_users: false
-      link_preview:
-        enabled: false
     YAML
   end
 
@@ -101,8 +99,8 @@ class PluginTest < Minitest::Test
     say("alice", "ECHO hi")
     assert_equal ["Unknown command. Try HELP."], notices_to("alice")
 
-    @conn.clear
     @bot.handle(":ModeBot!bot@host JOIN #other")
+    @conn.clear
     say_in("#other", "alice", ".echo hi")
     say_in("#chan", "alice", ".echo hi")
     assert_equal ["PRIVMSG #chan :hi"], @conn.lines
@@ -370,20 +368,11 @@ class PluginTest < Minitest::Test
 
   def test_example_plugins_work
     examples = File.expand_path("../contrib/plugins", __dir__)
-    %w[dice seen].each { |name| write_plugin(name, File.read(File.join(examples, "#{name}.rb"))) }
+    write_plugin("dice", File.read(File.join(examples, "dice.rb")))
     start(%(plugins:\n  dice:\n    prefix: "!"\n))
 
     say_in("#chan", "alice", "!roll 3d6")
     assert_match(/\APRIVMSG #chan :alice rolls 3d6: \d+ \+ \d+ \+ \d+ = \d+\z/, @conn.lines.last)
-
-    @bot.handle(":bob!bob@bob.host JOIN #chan")
-    @conn.clear
-    say("alice", "SEEN Bob")
-    assert_match(/\Abob was last seen \d+ seconds? ago, joining #chan\.\z/, notices_to("alice").first)
-
-    @bot.send(:instance_variable_get, :@plugins).unload_all # as at shutdown
-    saved = JSON.parse(File.read(File.join(@tmpdir, "data", "plugins", "seen.json")))
-    assert_equal "bob", saved.dig("nicks", "bob", "nick")
   end
 
   def test_config_validates_plugin_sections

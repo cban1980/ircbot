@@ -27,17 +27,16 @@ module IRCBot
       "max_accounts" => 5_000,
       "admins" => [],
       "channels" => [],
-      "link_preview" => {},
+      "ctcp" => {},
       "plugins_dir" => "plugins",
       "plugins" => {} # plugin name => settings (see PLUGIN_DEFAULTS)
     }.freeze
 
-    LINK_PREVIEW_DEFAULTS = {
+    # The bot's own answers to CTCP requests (VERSION, PING, TIME,
+    # CLIENTINFO); plugins can answer other CTCP commands.
+    CTCP_DEFAULTS = {
       "enabled" => true,
-      "message_type" => "privmsg", # "privmsg" (normal channel message) or "notice"
-      "channels" => [],     # empty: every channel the bot is in
-      "ignore_nicks" => [], # e.g. other bots
-      "youtube_api_key" => nil
+      "version" => "ircbot (Ruby)"
     }.freeze
 
     # The bot's options for each plugin; any other keys in a plugin's
@@ -46,7 +45,9 @@ module IRCBot
       "enabled" => true,
       "private" => true, # commands by private message (/msg Bot ROLL)
       "prefix" => nil,   # e.g. "!": also commands in channels (!roll); nil: not in channels
-      "channels" => []   # limit channel commands to these; empty: every channel
+      "channels" => [],  # limit channel commands to these; empty: every channel
+      "networks" => [],  # load only on these networks; empty: every network
+      "network_settings" => {} # network name => settings overriding the ones above there
     }.freeze
     PLUGIN_PREFIX = /\A[\p{P}\p{S}]{1,3}\z/
 
@@ -71,11 +72,16 @@ module IRCBot
       from_file = File.exist?(path) ? YAML.safe_load_file(path) || {} : {}
       raise ConfigError, "#{path} must contain a mapping of settings" unless from_file.is_a?(Hash)
 
+      if from_file.key?("link_preview")
+        raise ConfigError, "link_preview: link previews are now the \"links\" plugin. Install it " \
+                           "(ircbot-docker plugin install contrib/plugins/links.rb) and move the settings " \
+                           "to plugins: links: (channels becomes only_channels; see docs/links.md)"
+      end
       unknown = from_file.keys - DEFAULTS.keys - ["networks"]
       raise ConfigError, "Unknown setting(s) in #{path}: #{unknown.join(', ')}" if unknown.any?
 
       # A secret in the config file means the file itself must be private.
-      SecureFile.check!(path) if from_file.dig("link_preview", "youtube_api_key")
+      SecureFile.check!(path) if secrets?(from_file["plugins"])
 
       config = DEFAULTS.merge(from_file.except("networks"))
       # Relative paths are resolved against the config file's directory.
@@ -86,8 +92,9 @@ module IRCBot
       config["status_file"] = File.expand_path(config["status_file"], base)
       config["plugins_dir"] = File.expand_path(config["plugins_dir"].to_s, base)
       config["admins"] = Array(config["admins"])
-      config["link_preview"] = link_preview(config["link_preview"])
-      config["plugins"] = plugins(config["plugins"])
+      config["ctcp"] = ctcp(config["ctcp"])
+      plugins_section = config["plugins"]
+      config["plugins"] = plugins(plugins_section)
       normalize_network!(config)
       validate_access!(config)
 
@@ -107,7 +114,46 @@ module IRCBot
 
         config["networks"] = [config.merge("id" => name.to_s)]
       end
+      apply_plugin_networks!(config, plugins_section)
       config
+    end
+
+    # Gives each network its view of the plugin settings: plugins limited to
+    # other networks are disabled there, and network_settings are applied.
+    def apply_plugin_networks!(config, section)
+      ids = config["networks"].map { |net| net["id"] }
+      config["plugins"].each do |name, settings|
+        (settings["networks"] + settings["network_settings"].keys).each do |id|
+          next if ids.any? { |known| known.casecmp?(id) }
+
+          raise ConfigError, "plugins: #{name}: there is no network #{id} (networks: #{ids.join(', ')})"
+        end
+      end
+      config["networks"].each do |net|
+        net["plugins"] = plugins((section || {}).to_h do |name, settings|
+          settings ||= {}
+          limit = Array(settings["networks"]).map(&:to_s)
+          overrides = (settings["network_settings"] || {}).find { |id, _| id.to_s.casecmp?(net["id"]) }&.last || {}
+          view = settings.merge(overrides)
+          view = view.merge("enabled" => false) if limit.any? && limit.none? { |id| id.casecmp?(net["id"]) }
+          [name, view]
+        end)
+      end
+    end
+
+    def ctcp(section)
+      raise ConfigError, "ctcp must be a mapping" unless section.nil? || section.is_a?(Hash)
+
+      unknown = (section || {}).keys - CTCP_DEFAULTS.keys
+      raise ConfigError, "Unknown ctcp setting(s): #{unknown.join(', ')}" if unknown.any?
+
+      ctcp = CTCP_DEFAULTS.merge(section || {})
+      raise ConfigError, "ctcp enabled must be true or false" unless [true, false].include?(ctcp["enabled"])
+
+      ctcp["version"] = ctcp["version"].to_s
+      raise ConfigError, "ctcp version must be one line" if ctcp["version"].match?(/[\r\n\0\x01]/)
+
+      ctcp
     end
 
     # One network's flat config from a config loaded with load: the network
@@ -171,21 +217,18 @@ module IRCBot
     USER = /\A[^\s@\0]+\z/
     UMODES = /\A(?:[+-][A-Za-z]+)+\z/
 
-    def link_preview(section)
-      raise ConfigError, "link_preview must be a mapping" unless section.nil? || section.is_a?(Hash)
+    SECRET_NAME = /key|token|secret|password/i
 
-      unknown = (section || {}).keys - LINK_PREVIEW_DEFAULTS.keys
-      raise ConfigError, "Unknown link_preview setting(s): #{unknown.join(', ')}" if unknown.any?
+    # True if a plugin section holds something that looks like a secret.
+    def secrets?(section)
+      return false unless section.is_a?(Hash)
 
-      preview = LINK_PREVIEW_DEFAULTS.merge(section || {})
-      preview["channels"] = Array(preview["channels"]).map(&:to_s)
-      preview["ignore_nicks"] = Array(preview["ignore_nicks"]).map(&:to_s)
-      preview["youtube_api_key"] = ENV["IRCBOT_YOUTUBE_API_KEY"] if ENV["IRCBOT_YOUTUBE_API_KEY"]
-      preview["message_type"] = preview["message_type"].to_s.downcase
-      unless %w[privmsg notice].include?(preview["message_type"])
-        raise ConfigError, "link_preview message_type must be privmsg or notice"
+      section.values.any? do |settings|
+        next false unless settings.is_a?(Hash)
+
+        settings.any? { |name, value| name.to_s.match?(SECRET_NAME) && !value.to_s.empty? } ||
+          secrets?(settings["network_settings"]) || secrets?(settings["channel_settings"])
       end
-      preview
     end
 
     def plugins(section)
@@ -208,6 +251,13 @@ module IRCBot
         settings["channels"] = Array(settings["channels"]).map(&:to_s)
         settings["channels"].each do |channel|
           raise ConfigError, "plugins: #{name}: #{channel.inspect} is not a valid channel name" unless channel.match?(Channels::NAME)
+        end
+        settings["networks"] = Array(settings["networks"]).map(&:to_s)
+        unless settings["network_settings"].is_a?(Hash) && settings["network_settings"].values.all? { |v| v.is_a?(Hash) }
+          raise ConfigError, "plugins: #{name} network_settings must map network names to settings"
+        end
+        if settings["network_settings"].values.any? { |v| v.key?("networks") || v.key?("network_settings") }
+          raise ConfigError, "plugins: #{name}: networks and network_settings can't be set inside network_settings"
         end
         [name, settings]
       end

@@ -233,6 +233,8 @@ cmd_init() {
     info "Created $DIR/config.yml from the example; edit it before starting ($PROG edit)"
   fi
   mkdir -p "$DIR/data" "$DIR/secret" "$DIR/plugins"
+  # Link previews are a plugin; new instances get it (remove it to opt out).
+  [ -e "$DIR/plugins/links.rb" ] || install -m 600 "$REPO/contrib/plugins/links.rb" "$DIR/plugins/links.rb"
   chmod -R go-rwx "$DIR" # everything private to you, copied files included
   echo "Next: $PROG account register <yournick>   (if you have no account yet)"
   echo "      $PROG start"

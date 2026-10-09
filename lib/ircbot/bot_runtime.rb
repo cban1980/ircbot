@@ -114,6 +114,7 @@ module IRCBot
     ensure
       ticker&.kill
       @lock.synchronize do
+        @plugins.emit(:disconnected) if @welcomed
         @conn.close
         @had_welcome = @welcomed
         reset_state
@@ -168,7 +169,6 @@ module IRCBot
       @log.info(changed.empty? ? "Config reloaded; no settings changed" : "Config reloaded; changed: #{changed.join(', ')}")
 
       @accounts.configure(session_ttl: @config["session_ttl_hours"] * 3600, max_accounts: @config["max_accounts"])
-      setup_link_preview if changed.include?("link_preview")
       sync_plugins # also picks up new and changed plugin files
 
       if changed.intersect?(CONNECTION_SETTINGS)
@@ -191,7 +191,7 @@ module IRCBot
     def sync_channels
       return unless @joined
 
-      wanted = (@config["channels"] + @channels.names).uniq { |c| key(c) }
+      wanted = (@config["channels"] + @channels.names + plugin_channel_names).uniq { |c| key(c) }
       current = @roster.channels_of(@nick)
       wanted.reject { |c| current.any? { |j| Casemap.eq?(j, c) } }.each { |c| send_raw("JOIN #{c}") }
       current.reject { |j| wanted.any? { |c| Casemap.eq?(c, j) } }.each { |c| send_raw("PART #{c} :No longer configured") }
@@ -201,6 +201,7 @@ module IRCBot
     # or hands it to the supervisor, which writes all networks' states.
     def write_status(state = nil)
       @status_state = state if state
+      @channel_snapshot = @roster.channels_of(@nick).sort.freeze
       now = Time.now.utc
       status = {
         "state" => @status_state || "starting",
@@ -209,7 +210,7 @@ module IRCBot
         "port" => @config["port"],
         "network" => @network_name,
         "nick" => @nick,
-        "channels" => @roster.channels_of(@nick).sort,
+        "channels" => @channel_snapshot,
         "connected_since" => @connected_at&.iso8601,
         "plugins" => @plugins&.status || {},
         "updated_at" => now.iso8601,
