@@ -12,13 +12,16 @@
 .env
 .env.*
 
-# Backups made by bin/gemdrop-docker backup (contain the pepper and hashes)
+# The keeper's socket (bin/gemdrop-keeper), if run outside instance/
+/run/
+*.sock
+
+# Backups made by bin/gemdrop-docker backup (contain the pepper, password
+# hashes and API keys)
 *.tar
 *.tar.gz
 *.tgz
 gemdrop-backup-*
-rubicon-backup-*
-ircbot-backup-*
 
 # Logs and test-run leftovers
 *.log
