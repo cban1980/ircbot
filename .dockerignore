@@ -7,4 +7,4 @@ testrun.*
 *.log
 .git/
 contrib/
-.gitignore
+!contrib/plugins/

@@ -5,15 +5,18 @@
 /data/
 /secret/
 /instance/
+/gems/
+/gems.lock
 *.key
 *.pem
 .env
 .env.*
 
-# Backups made by bin/ircbot-docker backup (contain the pepper and hashes)
+# Backups made by bin/rubicon-docker backup (contain the pepper and hashes)
 *.tar
 *.tar.gz
 *.tgz
+rubicon-backup-*
 ircbot-backup-*
 
 # Logs and test-run leftovers
