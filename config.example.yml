@@ -91,6 +91,10 @@ ctcp:
 # Writing plugins: docs/plugins.md.
 plugins_dir: plugins
 
+# Gems that plugins declare (requires_gem) are downloaded here by the bot;
+# the exact versions are recorded in gems.lock next to it.
+gems_dir: gems
+
 # Optional settings per plugin, keyed by file name. Every plugin file is
 # loaded whether or not it is listed here. The bot's options:
 #   enabled:  false to not load it (default true)

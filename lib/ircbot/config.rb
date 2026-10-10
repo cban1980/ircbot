@@ -29,6 +29,7 @@ module IRCBot
       "channels" => [],
       "ctcp" => {},
       "plugins_dir" => "plugins",
+      "gems_dir" => "gems", # gems plugins need, installed by the bot (lock file: gems.lock next to it)
       "plugins" => {} # plugin name => settings (see PLUGIN_DEFAULTS)
     }.freeze
 
@@ -91,6 +92,7 @@ module IRCBot
       config["tls_known_servers"] = File.expand_path(config["tls_known_servers"], base)
       config["status_file"] = File.expand_path(config["status_file"], base)
       config["plugins_dir"] = File.expand_path(config["plugins_dir"].to_s, base)
+      config["gems_dir"] = File.expand_path(config["gems_dir"].to_s, base)
       config["admins"] = Array(config["admins"])
       config["ctcp"] = ctcp(config["ctcp"])
       plugins_section = config["plugins"]

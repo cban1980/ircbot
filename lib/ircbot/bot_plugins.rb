@@ -58,6 +58,7 @@ module IRCBot
       def submit(&) = @bot.__send__(:plugin_pool).submit(&)
       def data_dir = @bot.__send__(:plugin_data_dir)
       def http = @bot.__send__(:plugin_http)
+      def gems = @bot.__send__(:plugin_gems)
 
       private
 
@@ -248,9 +249,12 @@ module IRCBot
         reply(ctx, "No plugins in #{@config['plugins_dir']}.") if status.empty?
         status.each { |plugin, info| reply(ctx, plugin_summary(plugin, info)) }
       in ["LOAD" | "RELOAD", false]
-        @plugins.load(name.downcase)
-        @log.info("#{account} loaded plugin #{name.downcase}")
-        reply(ctx, "Plugin #{name.downcase} loaded.")
+        if @plugins.load(name.downcase) == :installing
+          reply(ctx, "Plugin #{name.downcase} is installing the gems it needs; it loads when they are in.")
+        else
+          @log.info("#{account} loaded plugin #{name.downcase}")
+          reply(ctx, "Plugin #{name.downcase} loaded.")
+        end
       in ["RELOAD", true]
         sync_plugins
         @log.info("#{account} reloaded the plugins folder")
@@ -277,6 +281,7 @@ module IRCBot
         text += ". Last load failed: #{info['error']}" if info["error"]
         text
       when "error" then "#{name}: failed to load: #{info['error']}"
+      when "installing" then "#{name}: installing gems #{info['gems'].join(', ')}; loads when done"
       else "#{name}: #{info['state']}"
       end
     end
@@ -335,6 +340,14 @@ module IRCBot
 
     def plugin_http
       @plugin_http ||= SafeHttp.new(user_agent: "Mozilla/5.0 (compatible; ircbot)")
+    end
+
+    # Shared by every network in the process (one gems folder).
+    def plugin_gems
+      dir = File.expand_path(@config["gems_dir"] || "gems")
+      logger = @log.dup
+      logger.progname = "gems"
+      PluginGems.for(dir, logger: logger)
     end
 
     def plugin_account(nick, userhost)

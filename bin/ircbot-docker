@@ -465,6 +465,7 @@ cmd_plugin() {
         line += "  commands: #{p["commands"].empty? ? "-" : p["commands"].join(" ")}"
         line += "  via: #{where.empty? ? "events only" : where.join(", ")}"
       end
+      line += "  gems: #{p["gems"].join(", ")}" if p["state"] == "installing"
       line += "\n    error: #{p["error"]}" if p["error"]
       puts line
     end'
@@ -512,6 +513,9 @@ cmd_backup() {
   require_instance
   local file=${1:-ircbot-backup-$(date +%Y%m%d-%H%M%S).tar.gz} parts=(config.yml data secret)
   [ -d "$DIR/plugins" ] && parts+=(plugins)
+  # gems.lock pins the plugins' gems; the gems themselves are downloaded
+  # again after a restore.
+  [ -f "$DIR/gems.lock" ] && parts+=(gems.lock)
   case "$file" in /*) ;; *) file=$(pwd)/$file ;; esac
   [ ! -e "$file" ] || die "$file already exists"
   (
@@ -542,7 +546,7 @@ cmd_restore() {
   local entry
   while IFS= read -r entry; do
     case "$entry" in
-      config.yml|data|data/*|secret|secret/*|plugins|plugins/*) ;;
+      config.yml|data|data/*|secret|secret/*|plugins|plugins/*|gems.lock) ;;
       *) die "unexpected entry in backup: $entry" ;;
     esac
     case "$entry" in *..*) die "unsafe path in backup: $entry" ;; esac

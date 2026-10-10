@@ -92,6 +92,24 @@ module IRCBot
 
       def settings_spec = (@settings_spec ||= {})
 
+      # Declares a gem the plugin needs, e.g. requires_gem "nokogiri", "~> 1.16".
+      # The bot installs missing gems into the instance's gems folder before
+      # loading the plugin (see PluginGems); here the gem is activated and
+      # required. require: what to require, if not the gem's name (false:
+      # nothing). Put it at the top of the class; a plain require of the gem
+      # works after it.
+      def requires_gem(name, *requirements, require: name)
+        begin
+          Kernel.send(:gem, name.to_s, *requirements)
+        rescue Gem::LoadError => e
+          raise Error, "gem #{[name, *requirements].join(' ')} is not available: #{e.message}"
+        end
+        Kernel.require(require.to_s) if require
+        required_gems << [name.to_s, requirements]
+      end
+
+      def required_gems = (@required_gems ||= [])
+
       # admin: only bot admins; identified: only users logged in to the bot.
       # aliases: other names for the command. where: :any, :channel or
       # :private. level: "voice", "op" or "owner" access needed on the

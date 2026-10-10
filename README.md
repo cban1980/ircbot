@@ -279,7 +279,9 @@ so they must be quick; use `background` for anything that waits. An
 exception in a plugin is logged and never stops the bot. Plugin commands
 share the bot's command rate limits, and output is checked and cut to
 fit, so a plugin can't inject raw protocol lines by accident. Only the
-standard library is available (the image has no gems).
+standard library is available, plus any gem a plugin declares with
+`requires_gem`: the bot downloads it into `instance/gems/` and loads the
+plugin when it's ready ([details](docs/plugins.md#gems)).
 
 **Plugins are trusted code.** They run inside the bot with its full
 privileges, including access to the password pepper and hashes, so only

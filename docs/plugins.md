@@ -35,6 +35,7 @@ covers installing and configuring plugins, and
 - [Timers and background work](#timers-and-background-work)
 - [HTTP](#http)
 - [Plugins working together](#plugins-working-together)
+- [Gems](#gems)
 - [Logging and errors](#logging-and-errors)
 - [CTCP](#ctcp)
 - [Security](#security)
@@ -104,8 +105,9 @@ plugins:
   background job is logged and the bot goes on. In a command, an
   `IRCBot::Error` sends its message to the user; any other exception is
   logged and the user is told the command failed.
-- **Only the standard library** is available; the Docker image has no
-  gems.
+- **Gems** a plugin needs are declared with
+  [`requires_gem`](#gems); the bot installs them itself. The standard
+  library and the gems bundled with Ruby are always there.
 
 ## Declarations
 
@@ -120,6 +122,7 @@ Class-level methods, written in the class body.
 | `on :event { \|event\| }` | An event hook ([Events](#events)); several per event are fine |
 | `ctcp_handler "NAME" { \|event\| "reply" }` | Answers a CTCP request ([CTCP](#ctcp)) |
 | `listen "topic" { \|payload, info\| }` | Receives messages from other plugins ([Plugins working together](#plugins-working-together)) |
+| `requires_gem "name", "~> 1.2"` | A gem the plugin needs ([Gems](#gems)) |
 
 Instance methods `setup` and `teardown` can be overridden. Any other
 methods you define are your own helpers.
@@ -473,6 +476,54 @@ end
 
 Payloads are passed as they are, not copied: don't change them in a
 listener.
+
+## Gems
+
+A plugin can use any gem from rubygems.org. Declare it at the top of the
+class:
+
+```ruby
+class Feeds < IRCBot::Plugin
+  requires_gem "nokogiri", "~> 1.16"            # activated and required here
+  requires_gem "feedjira", "~> 3.2", require: false
+
+  def setup
+    require "feedjira"                           # fine after requires_gem
+  end
+end
+```
+
+Before loading the plugin, the bot reads its `requires_gem` lines (without
+running the file) and checks which gems are missing. Missing ones are
+downloaded in the background into the instance's `gems/` folder (the
+`gems_dir` setting, next to `config.yml`), and the plugin loads by
+itself when they are in; meanwhile `plugin list` shows it as
+`installing`. The bot keeps running normally during the download, and a
+version of the plugin that is already loaded keeps working until then.
+
+- **Versions:** each requirement is any RubyGems requirement
+  (`"~> 1.16"`, `">= 2.0", "< 3"`). The exact versions installed are
+  recorded in `gems.lock` next to the folder; later installs (another
+  plugin, a new server) use the locked version if it fits, so the bot
+  keeps running what you tested. Delete a line to allow an upgrade.
+- **Shared:** gems are installed once for all networks and all plugins.
+  Two plugins needing incompatible versions of the same gem can't both
+  load; the second gets a clear error.
+- **Dependencies** come along automatically. Gems Ruby already ships
+  (json, racc, rexml, csv, net-smtp, webrick, ...) are used rather than
+  downloaded again.
+- **Native extensions:** the image has no compiler. Most popular gems
+  with C code (nokogiri, sqlite3, ffi, google-protobuf, ...) ship
+  precompiled for Linux and install fine; gems that would have to be
+  compiled (e.g. bcrypt) fail with a message saying so, and the plugin
+  isn't loaded.
+- **Failures** (no network, no such gem or version) are logged and shown
+  in `plugin list`; the next reload or `PLUGIN LOAD` tries again.
+- **Backups** include `gems.lock`, not the gems: after a restore, the bot
+  downloads the same versions again when it starts.
+- Gems run with the bot's privileges like plugins do, and are fetched
+  from rubygems.org over HTTPS by RubyGems itself (not the guarded
+  client, which is for user-posted links).
 
 ## Logging and errors
 

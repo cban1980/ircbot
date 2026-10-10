@@ -20,7 +20,7 @@ module IRCBot
       tls_self_signed tls_known_servers allow_insecure network user realname
     ].freeze
     # Files opened at startup; changing these needs a restart.
-    RESTART_SETTINGS = %w[data_file pepper_file status_file].freeze
+    RESTART_SETTINGS = %w[data_file pepper_file status_file gems_dir].freeze
 
     RECONNECT_MIN = 5
     RECONNECT_MAX = 300

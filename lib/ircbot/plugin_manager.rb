@@ -25,6 +25,7 @@ module IRCBot
       @dir = nil
       @config = {}
       @cooldowns = {}      # seconds => RateLimiter
+      @installing = {}     # name => gems being installed before it loads
     end
 
     # Syntax-checks the plugin files without running them, for --check.
@@ -72,6 +73,7 @@ module IRCBot
       @loaded.keys.each do |name|
         unload(name) unless files.key?(name) && enabled?(name)
       end
+      @installing.select! { |name, _| files.key?(name) && enabled?(name) }
       @errors.select! { |name, _| files.key?(name) && enabled?(name) }
       files.each do |name, path|
         next if !enabled?(name) || @held.include?(name)
@@ -87,7 +89,9 @@ module IRCBot
       end
     end
 
-    # Loads or reloads one plugin. Raises Error (with a message for the user).
+    # Loads or reloads one plugin. Raises Error (with a message for the
+    # user). Returns :installing when the plugin's gems are being installed
+    # first; it loads by itself when they are in.
     def load(name)
       raise Error, "#{name.inspect} is not a valid plugin name." unless name.match?(NAME)
 
@@ -100,6 +104,10 @@ module IRCBot
     # hold: stay unloaded on config reloads until loaded again.
     def unload(name, hold: false, quiet: false)
       entry = @loaded.delete(name)
+      if entry.nil? && @installing.delete(name)
+        @held |= [name] if hold
+        return @log.info("Plugin #{name} won't load after its gems are installed")
+      end
       raise Error, "#{name} is not loaded." unless entry
 
       @held |= [name] if hold
@@ -109,7 +117,12 @@ module IRCBot
       @log.info("Plugin #{name} unloaded") unless quiet
     end
 
-    def unload_all = @loaded.keys.each { |name| unload(name) }
+    # At shutdown: also forgets plugins waiting for gems.
+    def unload_all
+      @stopped = true
+      @installing.clear
+      @loaded.keys.each { |name| unload(name) }
+    end
 
     # --- commands and events ------------------------------------------------------
 
@@ -243,6 +256,8 @@ module IRCBot
                    "commands" => entry.plugin.class.commands.values.uniq.map(&:name),
                    "private" => options["private"], "prefix" => options["prefix"],
                    "error" => @errors[name] }.compact
+               elsif @installing.key?(name)
+                 { "state" => "installing", "gems" => @installing[name].map(&:to_s) }
                elsif @errors.key?(name) then { "state" => "error", "error" => @errors[name] }
                elsif !enabled?(name) then { "state" => "disabled" }
                else { "state" => "unloaded" }
@@ -314,6 +329,10 @@ module IRCBot
 
     def load_file(name, path)
       source = self.class.read_file(path)
+      gems = PluginGems.requirements(source)
+      missing = gems.empty? ? [] : @host.gems.missing(gems)
+      return wait_for_gems(name, missing) if missing.any?
+
       klass = evaluate(path, source)
       check_commands!(name, klass)
       plugin = klass.new(name: name, settings: settings_for(name), host: @host, logger: plugin_logger(name))
@@ -341,6 +360,34 @@ module IRCBot
       @log.error("Plugin #{name} failed to load#{' (the previous version keeps running)' if @loaded.key?(name)}: " \
                  "#{@errors[name]} (#{e.backtrace&.first})")
       raise Error, "#{name} failed to load: #{@errors[name]}"
+    end
+
+    # Installs a plugin's missing gems in the background; the plugin (or
+    # its new version) loads when they are in. A loaded old version keeps
+    # running meanwhile.
+    def wait_for_gems(name, missing)
+      return :installing if @installing.key?(name)
+
+      @installing[name] = missing
+      @errors.delete(name)
+      @log.info("Plugin #{name} needs #{missing.join(', ')}; installing, it loads when done")
+      @host.gems.install(missing) { |error| @host.synchronize { gems_ready(name, error) } }
+      :installing
+    end
+
+    def gems_ready(name, error)
+      return if @stopped || !@installing.delete(name)
+
+      if error
+        @errors[name] = "couldn't install its gems: #{error}"
+        return @log.error("Plugin #{name} not loaded: #{@errors[name]}")
+      end
+
+      begin
+        load(name)
+      rescue Error
+        nil # logged by load
+      end
     end
 
     def evaluate(path, source)
