@@ -161,8 +161,8 @@ plugins:
     fallback: [gemini]
     language: English
     backends:
-      groq:   { type: groq, model: llama-3.3-70b-versatile, api_key_file: groq.key }
-      gemini: { type: gemini, model: gemini-2.5-flash-lite, api_key_file: gemini.key }
+      groq:   { type: groq, model: openai/gpt-oss-120b, api_key_file: groq.key, options: { reasoning_effort: low } }
+      gemini: { type: gemini, model: gemini-3.5-flash-lite, api_key_file: gemini.key }
     channel_settings:
       IRCnet:                                    # IRCnet's channels
         "#linux.se": { chat: true, backend: gemini, language: Swedish }
