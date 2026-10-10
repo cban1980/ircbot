@@ -27,7 +27,8 @@ module Gemdrop
       ["WHOAMI", "Account", "WHOAMI", "show who you are identified as", "anyone", nil],
       ["PLUGIN", "Admin", "PLUGIN LIST|LOAD|UNLOAD|RELOAD|SETTINGS|SET|UNSET ...", "manage plugins on this network", "admin",
        "PLUGIN LIST, PLUGIN LOAD|UNLOAD <name> (remembered per network), PLUGIN RELOAD [name], " \
-       "PLUGIN SETTINGS <name>, PLUGIN SET <name> <setting> <value>, PLUGIN UNSET <name> <setting>."]
+       "PLUGIN SETTINGS <name>, PLUGIN SET <name> [#chan] <setting> <value>, PLUGIN UNSET <name> [#chan] <setting> " \
+       "(with a channel: that channel's setting, for settings that can be set per channel)."]
     ].map do |name, group, usage, help, access, details|
       HelpCatalog::Command.new(name: name, source: "core", group: group, usage: usage, help: help, details: details,
                                access: access)
@@ -36,13 +37,18 @@ module Gemdrop
     # Commands carrying a password; only accepted from users connected via TLS.
     SECRET_COMMANDS = %w[REGISTER IDENTIFY PASSWORD].freeze
 
+    # Words close to these (a typo or two) start a message that may hold a
+    # password, so it is never handed to a plugin as chat.
+    SECRET_WORDS = %w[register identify password passwd login auth].freeze
+
     # Message text that carries a password, including a mistyped "/msg Bot ...".
     SECRET_TEXT = /\A\s*(?:\/?msg\s+\S+\s+)?(?:REGISTER|IDENTIFY|PASSWORD)(?:\s+\S+){1,2}\s*\z/i
     SECRET_LINE = /\A(.*?(?:PRIVMSG|NOTICE) \S+ :\s*(?:\/?msg\s+\S+\s+)?(?:REGISTER|IDENTIFY|PASSWORD)\b).*/i
 
-    # PLUGIN SET of a secret-looking setting (an API key or token).
-    SECRET_SETTING = /\A\s*(?:\/?msg\s+\S+\s+)?PLUGIN\s+SET\s+\S+\s+\S*(?:key|token|secret|password)\S*\s/i
-    SECRET_SETTING_LINE = /\A(.*?(?:PRIVMSG|NOTICE) \S+ :\s*(?:\/?msg\s+\S+\s+)?PLUGIN\s+SET\s+\S+\s+\S*(?:key|token|secret|password)\S*)\s.*/i
+    # PLUGIN SET of a secret: a secret-looking setting name, or one in the
+    # value (a mapping such as {api_key: ...}). The value is redacted.
+    SECRET_SETTING = /\A\s*(?:\/?msg\s+\S+\s+)?PLUGIN\s+SET\s+\S+\s+(?=.*?(?:\b|_)(?:key|apikey|token|secret|password|passwd)(?:\b|_))\S+\s/im
+    SECRET_SETTING_LINE = /\A(.*?(?:PRIVMSG|NOTICE) \S+ :\s*(?:\/?msg\s+\S+\s+)?PLUGIN\s+SET\s+\S+\s+(?=.*?(?:\b|_)(?:key|apikey|token|secret|password|passwd)(?:\b|_))\S+)\s.*/im
 
     # How a user's TLS status shows up in WHOIS: 671 on most networks,
     # 320 "is a Secure Connection (SSL/TLS)" on IRCnet (ircd 2.11.3+).
@@ -123,7 +129,7 @@ module Gemdrop
       @config_path = config_path # enables reloading on SIGHUP
       @log = logger
       @own_connection = connection.nil? # rebuilt when connection settings change
-      @conn = connection || Connection.from_config(config)
+      @conn = connection || Bot.connection_for(config, @network_id)
       @lock = Monitor.new # serializes IRC handling with reloads from the signal thread
       @wake = Queue.new   # interrupts the reconnect delay
       @clock = clock || -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) }
@@ -147,7 +153,16 @@ module Gemdrop
       @nick_attempts = 0
       @welcomed = false
       @joined = false
+      reset_caps
       setup_plugins
+    end
+
+    # The IRC connection for a network: through the keeper if there is one
+    # (keeper_socket), else a direct one.
+    def self.connection_for(config, network_id)
+      return Connection.from_config(config) unless config["keeper_socket"]
+
+      KeeperConnection.new(path: config["keeper_socket"], network: network_id, params: Connection.params(config))
     end
 
     # (run, signal handling, config reload and the status file are in
@@ -185,6 +200,7 @@ module Gemdrop
       @roster.note_userhost(msg.nick, msg.userhost) if msg.userhost
       case msg.command
       when "PING" then on_ping(msg)
+      when "CAP" then on_cap(msg)
       when "001" then on_welcome(msg)
       when "005" then on_isupport(msg)
       when "376", "422" then on_end_of_motd # end of MOTD / no MOTD
@@ -217,6 +233,7 @@ module Gemdrop
     # --- connection lifecycle -------------------------------------------
 
     def register_connection
+      cap_start(registering: true) if @plugins.wanted_caps.any?
       send_raw("NICK #{@nick}")
       send_raw("USER #{@config['user']} 0 * :#{@config['realname']}")
     end
@@ -230,6 +247,7 @@ module Gemdrop
       @monitor_supported = false
       @monitoring = false
       @isupport.clear
+      reset_caps
       @link_since = nil
       @last_received = nil
       @link_pinged = false
@@ -242,6 +260,7 @@ module Gemdrop
 
     def on_welcome(msg)
       @welcomed = true
+      @cap_negotiating = false # registered: whatever CAP was doing is over
       @nick = msg.params[0]
       send_raw("MODE #{@nick} #{@config['umodes']}") unless @config["umodes"].empty?
       join_channels unless @config["network"]
@@ -478,7 +497,7 @@ module Gemdrop
 
       ctx = Context.new(nick: msg.nick, userhost: msg.userhost)
       queue_command(ctx.userhost) do
-        COMMANDS.key?(command) ? dispatch(ctx, command, args) : run_private_plugin_command(ctx, command, args)
+        COMMANDS.key?(command) ? dispatch(ctx, command, args) : run_private_plugin_command(ctx, command, args, name)
       end
     end
 

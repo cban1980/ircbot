@@ -150,7 +150,7 @@ module Gemdrop
     def remove(network, bot)
       @log.info("Network #{bot.network_id} was removed from the config; disconnecting")
       @mutex.synchronize { @bots.delete(network) }
-      bot.stop("Leaving this network")
+      bot.stop("Leaving this network", quit: true)
       @status_mutex.synchronize do
         @statuses.delete(network)
         write_status_file

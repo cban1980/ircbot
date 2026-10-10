@@ -35,7 +35,7 @@ module Gemdrop
 
     Command = Data.define(:name, :usage, :help, :details, :admin, :identified, :aliases, :where, :level, :cooldown,
                           :access, :handler)
-    Setting = Data.define(:name, :default, :type, :values, :min, :max, :desc)
+    Setting = Data.define(:name, :default, :type, :values, :min, :max, :desc, :locked, :channel)
 
     # connected, disconnected               the connection to the network
     # message, action                       channel messages and /me (action also in private)
@@ -82,22 +82,39 @@ module Gemdrop
       def defaults(hash = nil)
         return @defaults = hash.transform_keys(&:to_s) if hash
 
-        settings_spec.transform_values(&:default).compact.merge(@defaults || {})
+        defaults = settings_spec.transform_values(&:default).compact
+        defaults["channel_settings"] = {} if channel_settings?
+        defaults.merge(@defaults || {})
       end
+
+      # True if some settings can be set per channel (see #setting). A
+      # plugin that declares channel_settings itself handles it alone.
+      def channel_settings? = settings_spec.each_value.any?(&:channel) && !settings_spec.key?("channel_settings")
 
       # Declares a setting with a default and checks: type (:string,
       # :integer, :number, :boolean, :list, :hash, :channel or :nick),
       # values (allowed values), min and max (numbers, or lengths of
       # strings and lists). A config value that fails a check stops the
-      # plugin from loading, with the reason in "plugin list".
-      def setting(name, default: nil, type: nil, values: nil, min: nil, max: nil, desc: nil)
+      # plugin from loading, with the reason in "plugin list". locked: only
+      # config.yml sets it, never PLUGIN SET (for settings that decide where
+      # secrets are sent, such as an API's address). channel: it can be set
+      # per channel, under channel_settings (see #settings_for).
+      def setting(name, default: nil, type: nil, values: nil, min: nil, max: nil, desc: nil, locked: false,
+                  channel: false)
         raise ArgumentError, "unknown setting type #{type.inspect}" if type && !SETTING_TYPES.include?(type)
+        raise ArgumentError, "a locked setting can't be set per channel" if locked && channel
 
         settings_spec[name.to_s] = Setting.new(name: name.to_s, default: default, type: type, values: values,
-                                               min: min, max: max, desc: desc.to_s)
+                                               min: min, max: max, desc: desc.to_s, locked: locked,
+                                               channel: channel)
       end
 
       def settings_spec = (@settings_spec ||= {})
+
+      # Declares IRCv3 capabilities the plugin wants (e.g. "account-notify",
+      # "server-time"); the bot asks the server for them. Check with cap?.
+      def wants_cap(*names) = wanted_caps.concat(names.map { |n| n.to_s.downcase }).uniq!
+      def wanted_caps = (@wanted_caps ||= [])
 
       # Declares a gem the plugin needs, e.g. requires_gem "nokogiri", "~> 1.16".
       # The bot installs missing gems into the instance's gems folder before
@@ -168,6 +185,21 @@ module Gemdrop
 
       def ctcp_handlers = (@ctcp_handlers ||= {})
 
+      # Handles private messages that aren't commands (a conversation),
+      # instead of the bot's "Unknown command." The block gets a command
+      # context (ctx.text is the message) and its words. One loaded plugin
+      # at a time. Text that looks like a mistyped password command
+      # ("identfy secret") never gets here.
+      def private_text(&handler)
+        raise ArgumentError, "private_text needs a block" unless handler
+
+        @private_text = Command.new(name: "(chat)", usage: "", help: "", details: nil, admin: false,
+                                    identified: false, aliases: [], where: :private, level: nil, cooldown: nil,
+                                    access: "anyone", handler: handler)
+      end
+
+      def private_text_handler = @private_text
+
       # Receives messages that other plugins #publish under the topic. The
       # block gets (payload, info), info being { plugin:, network: } of the sender.
       def listen(topic, &handler)
@@ -230,6 +262,10 @@ module Gemdrop
     # take no place in the plugin's queue). Called on the bot's thread:
     # keep it a quick check.
     def wants_event?(_type) = true
+
+    # IRCv3 capabilities enabled on this connection (see wants_cap).
+    def caps = @host.caps
+    def cap?(name) = caps.include?(name.to_s.downcase)
 
     # (say, notice, action, ctcp, ctcp_reply, join, part, mode, op, deop,
     # voice, devoice, ban, unban, kick, kickban, ban_mask, set_topic, invite
@@ -424,6 +460,77 @@ module Gemdrop
       raise Error, "#{url} did not return valid JSON."
     end
 
+    # POSTs body (a Hash, sent as JSON) to an API, inside #background.
+    # Returns a SafeHttp::Response whatever the status, body as UTF-8 text
+    # (parse it yourself: error pages are not always JSON). No redirects
+    # are followed. local: true also reaches localhost, private networks
+    # and any port; only for an address from config.yml, never one a user
+    # gave. Raises Error if the request can't be made or times out.
+    def http_post_json(url, body, headers: {}, timeout: 60, max_bytes: 1024 * 1024, local: false)
+      http_request(:post, url, json: body, headers: headers, timeout: timeout, max_bytes: max_bytes, local: local)
+    end
+
+    # Any HTTP request to an API, inside #background, with the rules of
+    # http_post_json (no redirects; local: for config.yml's addresses).
+    # method: :get, :post, :put, :patch, :delete or :head. The body is one
+    # of json: (a Hash or Array, sent as JSON), form: (a Hash, sent
+    # URL-encoded) or body: (a String, with content_type:). Returns a
+    # SafeHttp::Response whatever its status, the body as UTF-8 text.
+    def http_request(method, url, body: nil, json: nil, form: nil, content_type: nil, accept: "*/*", headers: {},
+                     timeout: 60, max_bytes: 1024 * 1024, local: false)
+      raise ArgumentError, "http_request must run inside background { ... }" unless Thread.current[:gemdrop_background]
+      raise ArgumentError, "give at most one of body:, json:, form:" if [body, json, form].compact.size > 1
+
+      if json
+        body = JSON.generate(json)
+        content_type ||= "application/json"
+        accept = "application/json" if accept == "*/*"
+      elsif form
+        body = URI.encode_www_form(form)
+        content_type ||= "application/x-www-form-urlencoded"
+      end
+      response = @host.http.request(method, url.to_s, body: body, content_type: content_type, accept: accept,
+                                                      headers: headers, timeout: timeout, max_bytes: max_bytes,
+                                                      local: local)
+      response.body&.force_encoding(Encoding::UTF_8)&.scrub!
+      response
+    rescue SafeHttp::Refused, Timeout::Error, IOError, SystemCallError, SocketError, OpenSSL::SSL::SSLError,
+           Net::HTTPBadResponse, Net::ProtocolError, URI::Error => e
+      raise Error, "Request failed: #{e.message}."
+    end
+
+    # Reads a secret (an API key) from a file in the bot's secret folder
+    # (secret/ in an instance): name is a plain file name, the file must be
+    # private to the bot's user. Returns the content without surrounding
+    # whitespace. Raises Error if it is missing, unsafe or too big.
+    def secret_file(name)
+      name = name.to_s
+      raise Error, "#{name.inspect} is not a plain file name." unless name.match?(/\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\z/)
+
+      path = File.join(@host.secrets_dir, name)
+      SecureFile.check!(path)
+      raise Error, "#{name} is too big for a secret." if File.size(path) > 8192
+
+      File.read(path).strip
+    rescue ConfigError, SystemCallError => e
+      raise Error, "secret file #{name}: #{e.message}"
+    end
+
+    # The settings for a channel on this network (see Plugin.setting's
+    # channel:): the plugin's, then channel_settings' entry for the channel
+    # on every network ("#chan"), then the one for this network's channel
+    # ("IRCnet" => { "#chan" => ... }). Without a channel, just #settings.
+    def settings_for(channel)
+      table = settings["channel_settings"]
+      return settings unless channel && table.is_a?(Hash) && !table.empty?
+
+      here = table.find { |key, value| value.is_a?(Hash) && !key.to_s.match?(Channels::NAME) && key.to_s.casecmp?(network.to_s) }
+      [table, here&.last || {}].reduce(settings) do |merged, level|
+        overrides = level.find { |key, _| key.to_s.match?(Channels::NAME) && Casemap.eq?(key, channel) }&.last
+        overrides.is_a?(Hash) ? merged.merge(overrides.transform_keys(&:to_s)) : merged
+      end
+    end
+
     # The plugin's logger; lines are marked with the network and plugin.
     def log = @log
 
@@ -489,6 +596,46 @@ module Gemdrop
 
         problem = setting_problem(spec, value)
         raise Error, "setting #{spec.name} #{problem} (got #{value.inspect})" if problem
+      end
+      check_channel_settings!
+    end
+
+    # channel_settings: { "#chan" => { setting => value } }, only for
+    # settings declared with channel: true, each passing that setting's checks.
+    def check_channel_settings!
+      overrides = @settings["channel_settings"]
+      return if overrides.nil? || overrides == {} || self.class.settings_spec.key?("channel_settings")
+      raise Error, "channel_settings: #{@name} has no settings that can be set per channel" unless
+        self.class.channel_settings?
+      raise Error, "channel_settings must be a mapping of channel to settings" unless overrides.is_a?(Hash)
+
+      overrides.each do |key, values|
+        raise Error, "channel_settings: #{key} must be a mapping" unless values.is_a?(Hash)
+        next check_channel_overrides(key, values) if key.to_s.match?(Channels::NAME)
+
+        # A network's own channels: { "IRCnet" => { "#chan" => {...} } }
+        unless networks.any? { |id| id.casecmp?(key.to_s) }
+          raise Error, "channel_settings: #{key.inspect} is neither a channel nor a network (networks: #{networks.join(', ')})"
+        end
+        values.each do |channel, inner|
+          raise Error, "channel_settings: #{key}: #{channel.inspect} is not a channel" unless channel.to_s.match?(Channels::NAME)
+          raise Error, "channel_settings: #{key}: #{channel} must be a mapping" unless inner.is_a?(Hash)
+
+          check_channel_overrides("#{key} #{channel}", inner)
+        end
+      end
+    end
+
+    def check_channel_overrides(label, values)
+      per_channel = self.class.settings_spec.values.select(&:channel).map(&:name)
+      values.each do |name, value|
+        spec = self.class.settings_spec[name.to_s]
+        unless per_channel.include?(name.to_s)
+          raise Error, "channel_settings: #{label}: #{name} can't be set per channel " \
+                       "(these can: #{per_channel.join(', ')})"
+        end
+        problem = setting_problem(spec, value)
+        raise Error, "channel_settings: #{label}: #{name} #{problem} (got #{value.inspect})" if problem
       end
     end
 

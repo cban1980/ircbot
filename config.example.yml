@@ -83,6 +83,12 @@ admins:
 channels:
   - "#mychannel"
 
+# --- Restarts without leaving IRC ---------------------------------------------
+# bin/gemdrop-keeper holds the IRC connections, so the bot can restart
+# (updates, crashes) without leaving IRC. bin/gemdrop-docker sets this up
+# itself; without Docker, run "bin/gemdrop-keeper run/keeper.sock" and:
+# keeper_socket: run/keeper.sock
+
 # --- Plugins -----------------------------------------------------------------
 # Ruby files in plugins_dir (one plugin per file, e.g. plugins/dice.rb;
 # examples in contrib/plugins/). Reloading the config ("gemdrop-docker
@@ -114,6 +120,16 @@ plugins:
   # ctcp:
   #   version: "Gemdrop (Ruby)"                   # the CTCP VERSION answer
   #   answer: [VERSION, PING, TIME, CLIENTINFO]   # which to answer
+  # Chat through an AI model (contrib/plugins/ai.rb; all settings in docs/ai.md).
+  # Keys go in files in secret/ (chmod 600), never in this file or on IRC:
+  # ai:
+  #   backends:
+  #     claude: { type: anthropic, model: claude-sonnet-4-5, api_key_file: anthropic.key }
+  #     local:  { type: ollama, model: llama3.2, base_url: "http://host.docker.internal:11434" }
+  #   fallback: [local]
+  #   channel_settings:                 # where it talks (chat), language, persona, backend ...
+  #     IRCnet:                         # per network; a plain "#chan" here: every network
+  #       "#mychannel": { chat: true, language: Swedish }
   # dice:
   #   prefix: "!"
   #   max_dice: 20

@@ -614,5 +614,11 @@ class BotTest < Minitest::Test
                  @bot.send(:redact, "PRIVMSG NickServ :IDENTIFY hunter22")
     assert_equal "@time=x :a!b@c PRIVMSG #chan :msg Gemdrop PASSWORD [redacted]",
                  @bot.send(:redact, "@time=x :a!b@c PRIVMSG #chan :msg Gemdrop PASSWORD old new")
+    assert_equal ":a!b@c PRIVMSG Gemdrop :PLUGIN SET links youtube_api_key [redacted]",
+                 @bot.send(:redact, ":a!b@c PRIVMSG Gemdrop :PLUGIN SET links youtube_api_key abc123")
+    assert_equal ":a!b@c PRIVMSG Gemdrop :PLUGIN SET ai backends [redacted]",
+                 @bot.send(:redact, ":a!b@c PRIVMSG Gemdrop :PLUGIN SET ai backends {a: {api_key: sk-1}}")
+    line = ":a!b@c PRIVMSG Gemdrop :PLUGIN SET ai max_tokens 300"
+    assert_equal line, @bot.send(:redact, line)
   end
 end

@@ -2,9 +2,10 @@ require "net/http"
 require "ipaddr"
 require "socket"
 require "timeout"
+require "json"
 
 module Gemdrop
-  # HTTP GET for untrusted, user-supplied URLs.
+  # HTTP GET for untrusted, user-supplied URLs, and POST for APIs.
   #
   # Guards against server-side request forgery and resource exhaustion:
   # - only http/https on their default ports, no credentials in the URL
@@ -74,16 +75,51 @@ module Gemdrop
       raise Refused, "too many redirects"
     end
 
+    # POSTs a JSON body to an API and returns the Response whatever its
+    # status, with the body read (up to max_bytes) so errors can be shown.
+    # Redirects are not followed (the 3xx is returned): an API that
+    # redirects a request carrying credentials is not followed anywhere.
+    # timeout bounds the whole request. local: also allow loopback and
+    # private addresses and any port, for services on the bot's own
+    # machine or network (e.g. a local model server). Only for addresses
+    # an admin configured, never for URLs from users.
+    def post_json(url, body, headers: {}, timeout: 60, max_bytes: 1024 * 1024, local: false)
+      payload = body.is_a?(String) ? body : JSON.generate(body)
+      request(:post, url, body: payload, content_type: "application/json", accept: "application/json",
+                          headers: headers, timeout: timeout, max_bytes: max_bytes, local: local)
+    end
+
+    METHODS = { get: Net::HTTP::Get, post: Net::HTTP::Post, put: Net::HTTP::Put, patch: Net::HTTP::Patch,
+                delete: Net::HTTP::Delete, head: Net::HTTP::Head }.freeze
+
+    # Any request to an API (see post_json for the rules): method is :get,
+    # :post, :put, :patch, :delete or :head; body a String sent as
+    # content_type. Returns the Response whatever its status, body read.
+    def request(method, url, body: nil, content_type: nil, accept: "*/*", headers: {}, timeout: 60,
+                max_bytes: 1024 * 1024, local: false)
+      klass = METHODS.fetch(method.to_s.downcase.to_sym) { raise ArgumentError, "unknown HTTP method #{method}" }
+      raise ArgumentError, "timeout must be 1 to 600 seconds" unless (1..600).cover?(timeout)
+      raise ArgumentError, "max_bytes must be 1 to 16 MiB" unless (1..16 * 1024 * 1024).cover?(max_bytes)
+
+      uri = check_uri(url, local: local)
+      headers = check_headers(headers)
+      headers["Content-Type"] = content_type.to_s if body && content_type
+      deadline = now + timeout
+      Timeout.timeout(timeout + IO_TIMEOUT, Refused, "request took too long") do
+        request_once(klass, uri, body, accept, headers, deadline, timeout, max_bytes, local)
+      end
+    end
+
     # Raises Refused unless the URI is an allowed target; returns it parsed.
-    def check_uri(url)
+    def check_uri(url, local: false)
       raise Refused, "URL too long" if url.length > MAX_URL_LENGTH
 
       uri = URI.parse(url)
-      raise Refused, "unsupported scheme" unless uri.is_a?(URI::HTTP) && @ports.key?(uri.scheme)
+      raise Refused, "unsupported scheme" unless uri.is_a?(URI::HTTP) && %w[http https].include?(uri.scheme)
       raise Refused, "missing host" if uri.hostname.to_s.empty?
       raise Refused, "IPv6 addresses are not fetched" if uri.host.start_with?("[")
       raise Refused, "credentials in URL" if uri.userinfo
-      raise Refused, "non-standard port" unless uri.port == @ports[uri.scheme]
+      raise Refused, "non-standard port" unless local || (@ports.key?(uri.scheme) && uri.port == @ports[uri.scheme])
 
       uri
     rescue URI::Error => e
@@ -91,11 +127,11 @@ module Gemdrop
     end
 
     # The first resolved IPv4 address, after checking that all IPv4 results
-    # are public. IPv6 results are ignored.
-    def vetted_address(host)
+    # are public (unless local). IPv6 results are ignored.
+    def vetted_address(host, local: false)
       addresses = @resolver.call(host).map { |address| IPAddr.new(address) }.select(&:ipv4?)
       raise Refused, "#{host} has no IPv4 address" if addresses.empty?
-      raise Refused, "#{host} resolves to a non-public address" if addresses.any? { |ip| blocked?(ip) }
+      raise Refused, "#{host} resolves to a non-public address" if !local && addresses.any? { |ip| blocked?(ip) }
 
       addresses.first.to_s
     end
@@ -155,10 +191,45 @@ module Gemdrop
       [response, location]
     end
 
-    def read_capped(res, body, deadline)
+    def request_once(klass, uri, payload, accept, headers, deadline, timeout, max_bytes, local)
+      http = Net::HTTP.new(uri.hostname, uri.port, nil) # nil: never use a proxy from ENV
+      http.ipaddr = vetted_address(uri.hostname, local: local)
+      http.use_ssl = uri.scheme == "https"
+      http.verify_mode = OpenSSL::SSL::VERIFY_PEER
+      http.min_version = OpenSSL::SSL::TLS1_2_VERSION
+      http.ciphers = Connection::DEFAULT_CIPHERS
+      http.open_timeout = http.ssl_timeout = http.write_timeout = IO_TIMEOUT
+      http.read_timeout = timeout # a model may think a while before answering
+      http.max_retries = 0
+
+      request = klass.new(uri)
+      request["User-Agent"] = @user_agent
+      request["Accept"] = accept
+      request["Accept-Encoding"] = "identity"
+      headers.each { |name, value| request[name] = value }
+      request.body = payload if payload
+
+      response = nil
+      body = String.new(encoding: Encoding::BINARY)
+      begin
+        http.start do
+          http.request(request) do |res|
+            read_capped(res, body, deadline, max_bytes) unless klass == Net::HTTP::Head
+            type = res["content-type"].to_s.split(";").first.to_s.strip.downcase
+            response = build_response(uri, res, type, body)
+            raise Done
+          end
+        end
+      rescue Done
+        nil
+      end
+      response
+    end
+
+    def read_capped(res, body, deadline, max_bytes = @max_bytes)
       res.read_body do |chunk|
-        body << chunk.byteslice(0, @max_bytes - body.bytesize)
-        break if body.bytesize >= @max_bytes
+        body << chunk.byteslice(0, max_bytes - body.bytesize)
+        break if body.bytesize >= max_bytes
         raise Refused, "fetch took too long" if now > deadline
       end
     end

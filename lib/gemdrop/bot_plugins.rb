@@ -82,6 +82,8 @@ module Gemdrop
       def synchronize(&) = @bot.__send__(:synchronize, &)
       def submit(&) = @bot.__send__(:plugin_pool).submit(&)
       def data_dir = @bot.__send__(:plugin_data_dir)
+      def secrets_dir = @bot.__send__(:plugin_secrets_dir)
+      def caps = @bot.caps
       def http = @bot.__send__(:plugin_http)
       def gems = @bot.__send__(:plugin_gems)
       def plugin_state = @bot.__send__(:plugin_state)
@@ -97,7 +99,7 @@ module Gemdrop
     end
 
     PLUGIN_USAGE = "PLUGIN LIST | LOAD <name> | UNLOAD <name> | RELOAD [name] | SETTINGS <name> | " \
-                   "SET <name> <setting> <value> | UNSET <name> <setting>".freeze
+                   "SET <name> [#chan] <setting> <value> | UNSET <name> [#chan] <setting>".freeze
 
     private
 
@@ -274,11 +276,37 @@ module Gemdrop
       true
     end
 
-    def run_private_plugin_command(ctx, command, args)
-      invocation = @plugins.private_command(command, args) or
+    def run_private_plugin_command(ctx, command, args, word = command)
+      invocation = @plugins.private_command(command, args)
+      invocation ||= @plugins.private_text([word] + args) unless secret_like?(word)
+      unless invocation
         return reply(ctx, @plugins.private_command("HELP", []) ? "Unknown command. Try HELP." : "Unknown command.")
+      end
 
       @plugins.run(invocation, nick: ctx.nick, userhost: ctx.userhost)
+    end
+
+    # A word a typo or two from a password command (see SECRET_WORDS):
+    # one for short words, two from six letters on.
+    def secret_like?(word)
+      word = word.to_s.downcase.delete_prefix("/")
+      SECRET_WORDS.any? do |secret|
+        typos = secret.length > 5 ? 2 : 1
+        (word.length - secret.length).abs <= typos && edit_distance(word, secret) <= typos
+      end
+    end
+
+    # Typos between two words: letters added, dropped, changed or swapped.
+    def edit_distance(a, b)
+      d = Array.new(a.length + 1) { |i| Array.new(b.length + 1) { |j| i.zero? ? j : (j.zero? ? i : 0) } }
+      (1..a.length).each do |i|
+        (1..b.length).each do |j|
+          cost = a[i - 1] == b[j - 1] ? 0 : 1
+          d[i][j] = [d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost].min
+          d[i][j] = [d[i][j], d[i - 2][j - 2] + 1].min if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1]
+        end
+      end
+      d[a.length][b.length]
     end
 
     # PLUGIN commands act on this network. UNLOAD and SET are remembered
@@ -319,6 +347,21 @@ module Gemdrop
         rows.each do |key, value, saved|
           reply(ctx, "#{name}: #{key} = #{PluginState.show(key, value)}#{' (saved with PLUGIN SET)' if saved}")
         end
+      in ["SET", false, 3..] if rest.first.match?(Channels::NAME)
+        channel = rest.first
+        key = rest[1].downcase
+        value = PluginState.parse_value(rest.drop(2).join(" "))
+        result = @plugins.set_channel_setting(name, channel, key, value)
+        @log.info("#{account} set #{name} #{key} for #{channel} on #{@network_id}")
+        reply(ctx, "#{name}: #{key} = #{PluginState.show(key, value)} saved for #{channel} on #{@network_id}" \
+                   "#{setting_result(result)}")
+      in ["UNSET", false, 2] if rest.first.match?(Channels::NAME)
+        channel = rest.first
+        key = rest[1].downcase
+        result = @plugins.unset_channel_setting(name, channel, key)
+        @log.info("#{account} unset #{name} #{key} for #{channel} on #{@network_id}")
+        reply(ctx, "#{name}: #{key} for #{channel} is back to config.yml's value on #{@network_id}" \
+                   "#{setting_result(result)}")
       in ["SET", false, 2..]
         key = rest.first.downcase
         value = PluginState.parse_value(rest.drop(1).join(" "))
@@ -438,6 +481,9 @@ module Gemdrop
     def synchronize(&) = @lock.synchronize(&)
 
     def plugin_pool = @plugin_pool ||= WorkerPool.new(size: 2, max_queue: 50, logger: @log)
+
+    # Where secret files live (the pepper's folder, secret/ in an instance).
+    def plugin_secrets_dir = File.dirname(@config["pepper_file"])
 
     def plugin_data_dir = @config["plugin_data_dir"] || File.join(File.dirname(@config["data_file"]), "plugins")
   end

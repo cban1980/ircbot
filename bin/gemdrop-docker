@@ -48,9 +48,14 @@ Running:
       --restart-policy P    docker restart policy (default: unless-stopped)
       --memory SIZE         memory limit (default: 512m; password hashing
                             uses ~64 MB per worker process)
-  stop [--timeout N]        quit IRC cleanly and remove the container
-  restart [--rebuild] [start options]
-                            check the config, then stop and start
+  stop [--timeout N] [--keep-irc]
+                            stop the bot and the keeper (quits IRC); --keep-irc
+                            stops only the bot, the keeper stays on IRC
+  restart [--rebuild] [--all] [start options]
+                            check the config, then replace the bot's container;
+                            the keeper keeps it on IRC meanwhile (no quit, no
+                            rejoin, logins kept). --all restarts the keeper too,
+                            which leaves IRC once (only for keeper code updates)
   reload                    apply config.yml and data changes live, without
                             reconnecting (unless connection settings changed)
   reconnect                 drop the IRC connection and reconnect
@@ -72,12 +77,14 @@ Running:
                             re-read config.yml (same as reload)
   update [--no-pull] [--no-restart]
                             pull \$GEMDROP_BRANCH (default: main) from origin, rebuild on
-                            the latest base image, restart if running
+                            the latest base image, restart the bot if running
+                            (it stays on IRC)
 
 Inspecting:
   status [--json]           container state, health, server, nick and channels
-  logs [-f] [-n N] [--since TIME]
-                            show the log (-f follow, -n last N lines)
+  logs [--keeper] [-f] [-n N] [--since TIME]
+                            show the log (-f follow, -n last N lines; --keeper:
+                            the keeper's log)
   shell                     shell in a throwaway container with the same mounts
 
 Accounts and channels (work while the bot runs):
@@ -100,7 +107,7 @@ Backup and migration:
   backup [FILE]             archive config.yml, data/, secret/ and plugins/ (contains the
                             pepper and password hashes: keep it private)
   restore FILE [--force]    unpack a backup into the instance folder
-  clean [--images]          remove the container (and the images)
+  clean [--images]          remove the containers (and the images)
 
 Instance folder: $DIR
 EOF
@@ -125,6 +132,13 @@ while [ $# -gt 0 ]; do
 done
 case "$DIR" in /*) ;; *) DIR=$(pwd)/$DIR ;; esac
 TEST_IMAGE=${IMAGE%:*}:test
+# The keeper holds the IRC connections, so the bot's container can be
+# replaced (restart, update) without leaving IRC; see lib/gemdrop/keeper.rb.
+KEEPER=$NAME-keeper
+KEEPER_SOCKET=/bot/run/keeper.sock
+# The code the keeper runs; when it changes, only "restart --all" applies it.
+KEEPER_FILES=(lib/gemdrop/keeper.rb lib/gemdrop/connection.rb lib/gemdrop/known_servers.rb
+              lib/gemdrop/message.rb lib/gemdrop/casemap.rb lib/gemdrop/log_formatter.rb bin/gemdrop-keeper)
 STATUS_FILE=$DIR/data/status.json
 
 # --- helpers -------------------------------------------------------------------
@@ -142,7 +156,7 @@ container_state() {
   # Some Docker versions print an empty line before failing for a missing
   # container, so only trust the output when inspect succeeds.
   local state
-  if state=$(docker container inspect --format '{{.State.Status}}' "$NAME" 2>/dev/null) && [ -n "$state" ]; then
+  if state=$(docker container inspect --format '{{.State.Status}}' "${1:-$NAME}" 2>/dev/null) && [ -n "$state" ]; then
     echo "$state"
   else
     echo "absent"
@@ -175,6 +189,52 @@ retire_legacy_container() {
   docker rm "$LEGACY_NAME" >/dev/null 2>&1 || true
 }
 
+# --- the keeper ---------------------------------------------------------------------
+
+keeper_state() { container_state "$KEEPER"; }
+
+keeper_code() { (cd "$REPO" && cat "${KEEPER_FILES[@]}") | sha256sum | cut -c1-16; }
+
+# True if the running keeper runs older code than this checkout.
+keeper_outdated() {
+  local running
+  running=$(docker container inspect --format '{{index .Config.Labels "gemdrop.keeper-code"}}' "$KEEPER" 2>/dev/null) || return 1
+  [ "$running" != "$(keeper_code)" ]
+}
+
+start_keeper() {
+  case "$(keeper_state)" in
+    running) return ;;
+    absent) ;;
+    *) docker rm "$KEEPER" >/dev/null 2>&1 || true ;;
+  esac
+  mkdir -p "$DIR/run"
+  chmod 700 "$DIR/run"
+  rm -f "$DIR/run/keeper.sock" # left by a keeper that was killed
+  base_run_opts
+  docker run --detach --restart unless-stopped --no-healthcheck \
+    --log-driver json-file --log-opt max-size=10m --log-opt max-file=3 \
+    "${run_opts[@]}" --name "$KEEPER" --memory 128m \
+    --env GEMDROP_LOG_LEVEL="${GEMDROP_LOG_LEVEL:-info}" \
+    --label "gemdrop.keeper=$DIR" --label "gemdrop.keeper-code=$(keeper_code)" \
+    --entrypoint ruby "$IMAGE" /app/bin/gemdrop-keeper "$KEEPER_SOCKET" >/dev/null
+  local tries=0
+  until [ -S "$DIR/run/keeper.sock" ]; do
+    tries=$((tries + 1))
+    [ "$(keeper_state)" = "running" ] && [ $tries -lt 50 ] || { docker logs --tail 20 "$KEEPER" >&2; die "the keeper didn't start"; }
+    sleep 0.2
+  done
+  info "Started $KEEPER (holds the IRC connections while the bot restarts)"
+}
+
+# Quits IRC on every network.
+stop_keeper() {
+  [ "$(keeper_state)" != "absent" ] || return 0
+  docker stop --time 20 "$KEEPER" >/dev/null 2>&1 || true
+  docker rm "$KEEPER" >/dev/null 2>&1 || true
+  info "Stopped $KEEPER (left IRC)"
+}
+
 ensure_image() {
   docker image inspect "$IMAGE" >/dev/null 2>&1 || cmd_build
 }
@@ -191,6 +251,9 @@ base_run_opts() {
     --security-opt no-new-privileges
     --pids-limit 128
     --init
+    # This machine, for services on it such as a local AI model server
+    # (http://host.docker.internal:11434 for Ollama; see docs/ai.md).
+    --add-host host.docker.internal:host-gateway
   )
 }
 
@@ -315,22 +378,23 @@ cmd_start() {
   esac
   cmd_check >/dev/null || die "config check failed; fix it first (details: $PROG check)"
 
+  retire_legacy_container
+  start_keeper
   base_run_opts
   run_opts+=(
     --name "$NAME"
     --memory "$memory"
     --env GEMDROP_LOG_LEVEL="$log_level"
+    --env GEMDROP_KEEPER_SOCKET="$KEEPER_SOCKET"
     --label "gemdrop.instance=$DIR"
   )
   if $foreground; then
-    info "Starting $NAME in the foreground (Ctrl-C stops it)"
-    retire_legacy_container
+    info "Starting $NAME in the foreground (Ctrl-C stops it; the keeper stays on IRC)"
     exec docker run --rm --interactive --tty "${run_opts[@]}" "$IMAGE" /bot/config.yml
   fi
 
   local since
   since=$(now_rfc3339)
-  retire_legacy_container
   docker run --detach --restart "$policy" \
     --log-driver json-file --log-opt max-size=10m --log-opt max-file=3 \
     "${run_opts[@]}" "$IMAGE" /bot/config.yml >/dev/null
@@ -340,33 +404,47 @@ cmd_start() {
 }
 
 cmd_stop() {
-  local timeout=15
+  local timeout=15 keep_irc=false
   while [ $# -gt 0 ]; do
     case "$1" in
       --timeout) [ $# -ge 2 ] || die "--timeout needs a value"; timeout=$2; shift 2 ;;
+      --keep-irc) keep_irc=true; shift ;;
       *) die "stop: unknown option $1" ;;
     esac
   done
   case "$(container_state)" in
-    absent) echo "$NAME is not running."; return ;;
-    running) docker stop --time "$timeout" "$NAME" >/dev/null ;;
+    absent) echo "$NAME is not running." ;;
+    running)
+      docker stop --time "$timeout" "$NAME" >/dev/null
+      remove_container
+      info "Stopped $NAME" ;;
+    *) remove_container ;;
   esac
-  remove_container
-  info "Stopped $NAME"
+  $keep_irc || stop_keeper
 }
 
+# Replaces the bot's container; the keeper keeps it on IRC meanwhile.
+# --all also restarts the keeper, which leaves IRC (for keeper updates).
 cmd_restart() {
-  local start_args=() rebuild=false
+  local start_args=() rebuild=false all=false
   for arg in "$@"; do
-    if [ "$arg" = "--rebuild" ]; then rebuild=true; else start_args+=("$arg"); fi
+    case "$arg" in
+      --rebuild) rebuild=true ;;
+      --all) all=true ;;
+      *) start_args+=("$arg") ;;
+    esac
   done
   require_instance
   $rebuild && cmd_build
   ensure_image
   # Check before stopping, so a broken config doesn't take the bot down.
   cmd_check >/dev/null || die "config check failed; the bot keeps running (details: $PROG check)"
-  cmd_stop
+  if $all; then cmd_stop; else cmd_stop --keep-irc; fi
   cmd_start "${start_args[@]}"
+  if ! $all && keeper_outdated; then
+    echo "Note: the keeper runs older code than this checkout. It keeps working; to update it too"
+    echo "      (the bot leaves and rejoins IRC once): $PROG restart --all"
+  fi
 }
 
 cmd_reload() {
@@ -402,6 +480,9 @@ cmd_status() {
     health=$(docker container inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$NAME")
   fi
   echo "Container: $NAME  ($state${health:+, $health})"
+  local kstate
+  kstate=$(keeper_state)
+  echo "Keeper:    $KEEPER  ($kstate$([ "$kstate" = running ] && keeper_outdated && echo ', older code: restart --all to update'))"
   echo "Image:     $IMAGE"
   echo "Instance:  $DIR"
   [ -f "$STATUS_FILE" ] || { echo "Bot:       no status yet"; return; }
@@ -427,17 +508,18 @@ cmd_status() {
 }
 
 cmd_logs() {
-  [ "$(container_state)" != "absent" ] || die "$NAME does not exist (start it with: $PROG start)"
-  local opts=()
+  local opts=() target=$NAME
   while [ $# -gt 0 ]; do
     case "$1" in
+      --keeper) target=$KEEPER; shift ;;
       -f|--follow) opts+=(--follow); shift ;;
       -n|--tail) [ $# -ge 2 ] || die "$1 needs a value"; opts+=(--tail "$2"); shift 2 ;;
       --since) [ $# -ge 2 ] || die "--since needs a value"; opts+=(--since "$2"); shift 2 ;;
       *) die "logs: unknown option $1" ;;
     esac
   done
-  docker logs "${opts[@]}" "$NAME"
+  [ "$(container_state "$target")" != "absent" ] || die "$target does not exist (start it with: $PROG start)"
+  docker logs "${opts[@]}" "$target"
 }
 
 cmd_account() {

@@ -31,6 +31,10 @@ module Gemdrop
       "channels" => [],
       "plugins_dir" => "plugins",
       "gems_dir" => "gems", # gems plugins need, installed by the bot (lock file: gems.lock next to it)
+      # bin/gemdrop-keeper's socket: it holds the IRC connections, so the bot
+      # can restart without leaving IRC (see Keeper). GEMDROP_KEEPER_SOCKET
+      # overrides it. nil: the bot connects itself.
+      "keeper_socket" => nil,
       "plugins" => {} # plugin name => settings (see PLUGIN_DEFAULTS)
     }.freeze
 
@@ -88,6 +92,12 @@ module Gemdrop
       config["status_file"] = File.expand_path(config["status_file"], base)
       config["plugins_dir"] = File.expand_path(config["plugins_dir"].to_s, base)
       config["gems_dir"] = File.expand_path(config["gems_dir"].to_s, base)
+      keeper = ENV["GEMDROP_KEEPER_SOCKET"].to_s.empty? ? config["keeper_socket"] : ENV["GEMDROP_KEEPER_SOCKET"]
+      config["keeper_socket"] = keeper && File.expand_path(keeper.to_s, base)
+      if config["keeper_socket"] && config["keeper_socket"].bytesize > Keeper::MAX_PATH
+        raise ConfigError, "keeper_socket: #{config['keeper_socket']} is too long for a socket " \
+                           "(#{config['keeper_socket'].bytesize} bytes, at most #{Keeper::MAX_PATH}); use a shorter path"
+      end
       config["admins"] = Array(config["admins"])
       plugins_section = config["plugins"]
       config["plugins"] = plugins(plugins_section)
@@ -215,19 +225,23 @@ module Gemdrop
     USER = /\A[^\s@\0]+\z/
     UMODES = /\A(?:[+-][A-Za-z]+)+\z/
 
-    SECRET_NAME = /key|token|secret|password/i
+    # Setting names that hold secrets: api_key, token, client_secret ...;
+    # not max_tokens, and not api_key_file or api_key_env, which only say
+    # where a secret is.
+    SECRET_NAME = /(?:\A|_)(?:key|apikey|token|secret|password|passwd)(?:\z|_(?!(?:file|env)\z))/i
 
-    # True if a plugin section holds something that looks like a secret.
-    def secrets?(section)
-      return false unless section.is_a?(Hash)
-
-      section.values.any? do |settings|
-        next false unless settings.is_a?(Hash)
-
-        settings.any? { |name, value| name.to_s.match?(SECRET_NAME) && !value.to_s.empty? } ||
-          secrets?(settings["network_settings"]) || secrets?(settings["channel_settings"])
+    # True if the plugins section holds something that looks like a secret,
+    # at any depth (e.g. plugins: ai: backends: openai: api_key: ...).
+    def secrets?(value)
+      case value
+      when Hash
+        value.any? { |name, inner| (name.to_s.match?(SECRET_NAME) && secret_value?(inner)) || secrets?(inner) }
+      when Array then value.any? { |inner| secrets?(inner) }
+      else false
       end
     end
+
+    def secret_value?(value) = !value.is_a?(Hash) && !value.is_a?(Array) && !value.to_s.empty?
 
     def plugins(section)
       raise ConfigError, "plugins must be a mapping of plugin name to settings" unless section.nil? || section.is_a?(Hash)

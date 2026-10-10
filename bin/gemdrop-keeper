@@ -1,0 +1,29 @@
+#!/usr/bin/env ruby
+# Holds the bot's IRC connections, so the bot can restart (to update it,
+# or after a crash) without leaving IRC. See lib/gemdrop/keeper.rb.
+#
+#   bin/gemdrop-keeper SOCKET      e.g. instance/run/keeper.sock
+#
+# Then run the bot with keeper_socket: SOCKET in config.yml (or
+# GEMDROP_KEEPER_SOCKET=SOCKET). SIGTERM or SIGINT quits IRC and exits;
+# the keeper itself only needs a restart when its own code changes.
+$LOAD_PATH.unshift File.expand_path("../lib", __dir__)
+require "gemdrop"
+
+abort "gemdrop-keeper: refusing to run as root; use an unprivileged account" if Process.euid.zero?
+File.umask(0o077)
+
+path = ARGV[0] || ENV.fetch("GEMDROP_KEEPER_SOCKET", nil)
+abort "usage: gemdrop-keeper SOCKET" if path.to_s.empty?
+
+$stdout.sync = true
+logger = Logger.new($stdout)
+logger.level = ENV["GEMDROP_LOG_LEVEL"] || "info"
+logger.formatter = Gemdrop::LogFormatter.new
+logger.progname = "keeper"
+
+begin
+  Gemdrop::Keeper.new(File.expand_path(path), logger: logger).run
+rescue Gemdrop::Error => e
+  abort "gemdrop-keeper: #{e.message}"
+end

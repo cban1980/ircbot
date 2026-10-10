@@ -35,13 +35,21 @@ module Gemdrop
       "1.3" => OpenSSL::SSL::TLS1_3_VERSION
     }.freeze
 
-    def self.from_config(config)
-      new(
-        host: config["server"], port: config["port"], tls: config["tls"], verify: config["tls_verify"],
-        min_version: config["tls_min_version"], fingerprint: config["tls_fingerprint"],
-        ciphers: config["tls_ciphers"] || DEFAULT_CIPHERS,
-        known_servers: config["tls_self_signed"] ? KnownServers.new(config["tls_known_servers"]) : nil
-      )
+    def self.from_config(config) = from_params(params(config))
+
+    # A network's connection settings as plain data (what a KeeperConnection
+    # hands the keeper; from_params makes the Connection from it).
+    def self.params(config)
+      { "host" => config["server"], "port" => config["port"], "tls" => config["tls"], "verify" => config["tls_verify"],
+        "min_version" => config["tls_min_version"].to_s, "fingerprint" => config["tls_fingerprint"],
+        "ciphers" => config["tls_ciphers"] || DEFAULT_CIPHERS,
+        "known_servers" => config["tls_self_signed"] ? config["tls_known_servers"] : nil }
+    end
+
+    def self.from_params(params)
+      new(host: params["host"], port: params["port"], tls: params["tls"], verify: params["verify"],
+          min_version: params["min_version"], fingerprint: params["fingerprint"], ciphers: params["ciphers"],
+          known_servers: params["known_servers"] && KnownServers.new(params["known_servers"]))
     end
 
     # Lines are UTF-8 when valid; otherwise (common on IRCnet) Latin-1.

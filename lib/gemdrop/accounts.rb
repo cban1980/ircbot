@@ -127,8 +127,33 @@ module Gemdrop
       @sessions.clear
     end
 
+    # The sessions as plain data, for the next bot process (see
+    # Bot#detach); ages instead of clock times, which don't carry over.
+    def export_sessions
+      now = @clock.call
+      @sessions.values.map do |s|
+        { "nick" => s[:nick], "account" => s[:account], "userhost" => s[:userhost], "epoch" => s[:epoch],
+          "age" => now - s[:at] }
+      end
+    end
+
+    # Takes over exported sessions; ones that expired or were invalidated
+    # meanwhile (password change, deleted account) are left out. Returns
+    # how many were kept.
+    def import_sessions(list)
+      now = @clock.call
+      list.count do |s|
+        session = { nick: s["nick"].to_s, account: s["account"].to_s, userhost: s["userhost"].to_s,
+                    epoch: s["epoch"], at: now - s["age"].to_f }
+        next false unless valid?(session, session[:userhost])
+
+        @sessions[key(session[:nick])] = session
+      end
+    end
+
     # Sessions are used by the bot's, the commands' and plugins' threads.
-    synchronize_methods :login, :logout, :rename, :account_for, :session_account, :identified, :clear_sessions
+    synchronize_methods :login, :logout, :rename, :account_for, :session_account, :identified, :clear_sessions,
+                        :export_sessions, :import_sessions
 
     private
 

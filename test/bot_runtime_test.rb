@@ -103,4 +103,17 @@ class BotRuntimeTest < Minitest::Test
     @bot.handle(":Gemdrop!bot@host PART #home")
     assert_empty status["channels"]
   end
+
+  # The health check reads the status file; quiet servers ping rarely.
+  def test_status_is_refreshed_every_minute_while_connected
+    before = status["updated_at_unix"]
+    @bot.instance_variable_set(:@last_heartbeat, Process.clock_gettime(Process::CLOCK_MONOTONIC))
+    sleep 1.1 # updated_at_unix counts whole seconds
+    @bot.send(:tick)
+    assert_equal before, status["updated_at_unix"], "not more often than once a minute"
+
+    @bot.instance_variable_set(:@last_heartbeat, Process.clock_gettime(Process::CLOCK_MONOTONIC) - 61)
+    @bot.send(:tick)
+    assert_operator status["updated_at_unix"], :>, before
+  end
 end

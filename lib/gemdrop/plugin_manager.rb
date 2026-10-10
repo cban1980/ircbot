@@ -172,6 +172,14 @@ module Gemdrop
       nil
     end
 
+    # The plugin that takes private messages that aren't commands (see
+    # Plugin.private_text), as an invocation for these words, or nil.
+    def private_text(words)
+      entry = @loaded.values.find { |e| e.plugin.class.private_text_handler } or return nil
+
+      Invocation.new(entry: entry, command: entry.plugin.class.private_text_handler, args: words, prefix: "")
+    end
+
     # A prefixed command in a channel ("!roll 2"), or nil.
     def channel_command(channel, text)
       @loaded.each_value do |entry|
@@ -251,6 +259,9 @@ module Gemdrop
     # CTCP commands plugins answer, for CLIENTINFO.
     def ctcp_commands = @loaded.values.flat_map { |entry| entry.plugin.class.ctcp_handlers.keys }.uniq
 
+    # IRCv3 capabilities the loaded plugins want (see Plugin.wants_cap).
+    def wanted_caps = @loaded.values.flat_map { |entry| entry.plugin.class.wanted_caps }.uniq
+
     # Hands a published message to the plugins listening for its topic,
     # except the sender itself. Returns how many listeners got it.
     def deliver(topic, payload, from:, network:)
@@ -278,9 +289,10 @@ module Gemdrop
     # (plugin not loaded), :reloaded or :installing.
     def set_setting(name, key, value)
       check_settable!(name, key)
+      check_unlocked!(name, key)
       previous = @state.settings(name)
       begin
-        Config.plugins(name => (@base_config[name] || {}).merge(previous).merge(key => value))
+        Config.plugins(name => self.class.merge_saved(@base_config[name] || {}, previous.merge(key => value)))
       rescue ConfigError => e
         raise Error, e.message.sub(/\Aplugins: /, "")
       end
@@ -293,9 +305,57 @@ module Gemdrop
       apply_setting_change(name) { previous.key?(key) ? @state.set(name, key, previous[key]) : @state.unset(name, key) }
     end
 
+    # Saves one setting for one channel on this network: in
+    # channel_settings under the network's name (see Plugin#settings_for),
+    # keeping the channel's other settings.
+    def set_channel_setting(name, channel, key, value)
+      check_settable!(name, key)
+      raise Error, "#{channel} is not a channel name." unless channel.match?(Channels::NAME)
+
+      saved = deep_copy(@state.settings(name)["channel_settings"] || {})
+      net = network_entry(name, saved)
+      table = (saved[net] ||= {})
+      entry = channel_entry(name, net, table, channel)
+      table[entry] = (table[entry] || {}).merge(key => value)
+      set_setting(name, "channel_settings", saved)
+    end
+
+    # Forgets a setting saved for one channel on this network.
+    def unset_channel_setting(name, channel, key)
+      check_settable!(name, key)
+      saved = deep_copy(@state.settings(name)["channel_settings"] || {})
+      net = network_entry(name, saved)
+      table = saved[net] || {}
+      entry = table.keys.find { |c| Casemap.eq?(c, channel) }
+      raise Error, "#{name} has no saved #{key} for #{channel} on #{@state.network}." unless entry && table[entry].key?(key)
+
+      table[entry].delete(key)
+      table.delete(entry) if table[entry].empty?
+      saved.delete(net) if table.empty?
+      return set_setting(name, "channel_settings", saved) if saved.any?
+
+      unset_setting(name, "channel_settings")
+    end
+
+    # Saved settings on top of config.yml's. channel_settings merge all
+    # the way down, so saving one channel's setting keeps config.yml's
+    # other settings for it, and for other channels and networks.
+    def self.merge_saved(base, saved)
+      merged = base.merge(saved)
+      from_file = base["channel_settings"]
+      from_state = saved["channel_settings"]
+      merged["channel_settings"] = deep_merge(from_file, from_state) if from_file.is_a?(Hash) && from_state.is_a?(Hash)
+      merged
+    end
+
+    def self.deep_merge(a, b)
+      a.merge(b) { |_key, x, y| x.is_a?(Hash) && y.is_a?(Hash) ? deep_merge(x, y) : y }
+    end
+
     # Forgets a saved setting, so config.yml's value (or the default) applies again.
     def unset_setting(name, key)
       check_settable!(name, key)
+      check_unlocked!(name, key)
       previous = @state.settings(name)
       raise Error, "#{name} has no saved #{key} on #{@state.network}." unless previous.key?(key)
 
@@ -431,7 +491,7 @@ module Gemdrop
     # config.yml's plugin sections with the saved settings on top.
     def refresh_config
       saved = @state.all_settings
-      merged = @base_config.merge(saved.to_h { |name, settings| [name, (@base_config[name] || {}).merge(settings)] })
+      merged = @base_config.merge(saved.to_h { |name, settings| [name, self.class.merge_saved(@base_config[name] || {}, settings)] })
       @config = begin
         Config.plugins(merged)
       rescue ConfigError => e
@@ -469,6 +529,35 @@ module Gemdrop
       raise Error, "No plugin file #{name}.rb in #{@dir}." unless available.key?(name) || @loaded.key?(name)
       raise Error, "#{key.inspect} is not a valid setting name." unless key.to_s.match?(SETTING_NAME)
       raise Error, "#{key} can only be changed in config.yml." if CONFIG_ONLY.include?(key)
+    end
+
+    # Locked settings (see Plugin.setting) are only set in config.yml. A
+    # plugin that isn't loaded can't say; what is saved for it meanwhile is
+    # dropped when it loads (settings_for).
+    # This network's and the channel's keys as config.yml spells them, so
+    # saved and configured entries merge.
+    def network_entry(name, saved)
+      known = saved.keys + base_channel_settings(name).keys
+      known.find { |key| !key.to_s.match?(Channels::NAME) && key.to_s.casecmp?(@state.network) } || @state.network
+    end
+
+    def channel_entry(name, net, table, channel)
+      configured = base_channel_settings(name)[net]
+      known = table.keys + (configured.is_a?(Hash) ? configured.keys : [])
+      known.find { |c| Casemap.eq?(c, channel) } || channel
+    end
+
+    def base_channel_settings(name)
+      table = (@base_config[name] || {})["channel_settings"]
+      table.is_a?(Hash) ? table : {}
+    end
+
+    def deep_copy(value) = Marshal.load(Marshal.dump(value))
+
+    def check_unlocked!(name, key)
+      return unless @loaded[name]&.plugin&.class&.settings_spec&.dig(key)&.locked
+
+      raise Error, "#{key} can only be changed in config.yml."
     end
 
     def reloading?(name) = @reloading == name
@@ -509,7 +598,17 @@ module Gemdrop
     def entry_settings(entry) = Config::PLUGIN_DEFAULTS.merge(entry.config || {})
 
     # The plugin's own settings: its config section minus the bot's options.
-    def settings_for(name) = (@config[name] || {}).except(*Config::PLUGIN_DEFAULTS.keys)
+    # With the class: locked settings come from config.yml only.
+    def settings_for(name, klass = nil)
+      settings = (@config[name] || {}).except(*Config::PLUGIN_DEFAULTS.keys)
+      locked = klass ? klass.settings_spec.values.select(&:locked).map(&:name) & @state.settings(name).keys : []
+      return settings if locked.empty?
+
+      @log.warn("Ignoring #{name} #{locked.join(', ')} saved with PLUGIN SET: only config.yml sets that")
+      base = @base_config[name] || {}
+      locked.each { |key| base.key?(key) ? settings[key] = base[key] : settings.delete(key) }
+      settings
+    end
 
     def file_digest(path)
       Digest::SHA256.hexdigest(self.class.read_file(path))
@@ -525,7 +624,7 @@ module Gemdrop
 
       klass = evaluate(path, source)
       check_commands!(name, klass)
-      plugin = klass.new(name: name, settings: settings_for(name), host: @host, logger: plugin_logger(name))
+      plugin = klass.new(name: name, settings: settings_for(name, klass), host: @host, logger: plugin_logger(name))
       previous = @loaded[name]
       reloading = !previous.nil?
       if reloading
@@ -612,6 +711,10 @@ module Gemdrop
     end
 
     def check_commands!(name, klass)
+      if klass.private_text_handler
+        other = @loaded.values.find { |e| e.name != name && e.plugin.class.private_text_handler }
+        raise Error, "private chat is already handled by plugin #{other.name}" if other
+      end
       klass.ctcp_handlers.each_key do |ctcp|
         other = @loaded.values.find { |e| e.name != name && e.plugin.class.ctcp_handlers.key?(ctcp) }
         raise Error, "CTCP #{ctcp} is already answered by plugin #{other.name}" if other

@@ -21,6 +21,7 @@ covers installing and configuring plugins, and
 | [help.rb](../contrib/plugins/help.rb) | the `HELP` command, built from the help catalog: every command and help page |
 | [chanserv.rb](../contrib/plugins/chanserv.rb) | channel services: access lists, op/voice commands, automatic modes, help topics and groups |
 | [ctcp.rb](../contrib/plugins/ctcp.rb) | the standard CTCP answers |
+| [ai.rb](../contrib/plugins/ai.rb) | conversations through any AI backend: JSON APIs, secret files, locked settings ([its docs](ai.md)) |
 
 ## Contents
 
@@ -39,6 +40,8 @@ covers installing and configuring plugins, and
 - [Timers and background work](#timers-and-background-work)
 - [HTTP](#http)
 - [Plugins working together](#plugins-working-together)
+- [Private conversations](#private-conversations)
+- [Capabilities](#capabilities)
 - [Gems](#gems)
 - [Logging and errors](#logging-and-errors)
 - [CTCP](#ctcp)
@@ -138,6 +141,8 @@ Class-level methods, written in the class body.
 | `help_group "Name"` | The heading for the plugin's commands in `LIST` ([Help](#help)) |
 | `on :event { \|event\| }` | An event hook ([Events](#events)); several per event are fine |
 | `ctcp_handler "NAME" { \|event\| "reply" }` | Answers a CTCP request ([CTCP](#ctcp)) |
+| `private_text { \|ctx, words\| }` | Gets private messages that aren't commands, a conversation ([Private conversations](#private-conversations)) |
+| `wants_cap "name", ...` | IRCv3 capabilities the plugin needs ([Capabilities](#capabilities)) |
 | `listen "topic" { \|payload, info\| }` | Receives messages from other plugins ([Plugins working together](#plugins-working-together)) |
 | `requires_gem "name", "~> 1.2"` | A gem the plugin needs ([Gems](#gems)) |
 
@@ -483,7 +488,18 @@ plugins:
         default_reason: "Bye"
 ```
 
-Don't use the names above for your own settings. To read the bot's
+Don't use the names above for your own settings.
+
+`setting "name", ..., locked: true` makes a setting config.yml-only:
+`PLUGIN SET` refuses it, and a value saved for it anyway is ignored when
+the plugin loads. Use it for settings that decide where secrets go (an
+API's address and key), so a stolen admin login can't redirect them.
+
+Setting names with `key`, `token`, `secret` or `password` as a part
+(`api_key`, `access_token`, not `max_tokens` or `api_key_file`) are
+treated as secrets, also inside mappings: `PLUGIN SETTINGS` shows them
+as `(hidden)`, `PLUGIN SET` lines that contain one are redacted in logs,
+and the bot insists that `config.yml` is private if it holds one. To read the bot's
 configuration, use [`bot_config`](#the-network-and-the-server).
 
 Admins can also change settings while the bot runs, per network, with
@@ -494,6 +510,44 @@ They go through the same checks: a value that fails a `setting` check,
 or makes `setup` raise, is refused and the plugin keeps its previous
 settings. So validating settings in `setup` (raise `Gemdrop::Error`)
 protects runtime changes too.
+
+### Per channel
+
+Settings declared with `channel: true` can also be set per channel, in
+`channel_settings` (the bot adds and checks it for you):
+
+```ruby
+setting "language", default: "", type: :string, channel: true
+setting "greeting", default: "Hi", type: :string, channel: true
+```
+
+```yaml
+plugins:
+  hello:
+    language: English
+    channel_settings:
+      "#linux.se": { language: Swedish, greeting: "Hej" }
+```
+
+A key that isn't a channel is a network's name, holding that network's
+channels; a plain `"#chan"` applies on every network:
+
+```yaml
+    channel_settings:
+      "#gunnit": { greeting: "Yo" }               # every network
+      IRCnet:
+        "#linux.se": { language: Swedish }        # IRCnet's #linux.se only
+```
+
+`settings_for(channel)` returns the settings for a channel on the
+plugin's network: `settings`, then the plain entry, then this network's
+entry (just `settings` for nil or a channel without any). Every override
+must be a `channel: true` setting and pass that setting's checks;
+anything else stops the plugin from loading with the reason. Admins set
+one channel's value live with `PLUGIN SET hello #linux.se language
+Finnish` (and `PLUGIN UNSET hello #linux.se language`), saved for the
+network it was sent on and merged with `config.yml`'s entries. A locked
+setting can't be per channel.
 
 ## Storage
 
@@ -539,12 +593,28 @@ Inside `background` only (they wait for the network):
 | --- | --- |
 | `http_get(url, accept: "*/*", types: /text|json|xml/)` | `SafeHttp::Response`: `url` (after redirects), `status`, `content_type`, `content_length`, `body` (read only for matching `types`) |
 | `http_json(url)` | Parsed JSON; raises `Gemdrop::Error` unless the answer is a 200 with JSON |
+| `http_request(method, url, json: / form: / body:, content_type:, accept:, headers:, timeout:, max_bytes:, local:)` | Any request to an API: `:get :post :put :patch :delete :head`, with a JSON (`json:`), URL-encoded (`form:`) or raw (`body:` + `content_type:`) body; the rules of `http_post_json`. Returns the `SafeHttp::Response` whatever its status |
+| `http_post_json(url, body, headers: {}, timeout: 60, max_bytes: 1 MiB, local: false)` | POSTs `body` (a Hash) as JSON to an API. Returns the `SafeHttp::Response` whatever its status, with the body as text, so error answers can be read (parse it yourself) |
 
 Requests go through the bot's guarded client: only http
 and https on standard ports, only public IPv4 addresses (no localhost or
 private networks, checked again at every redirect), at most 3 redirects,
 256 KiB and 10 seconds. A refused or failed request raises
 `Gemdrop::Error` with the reason.
+
+`http_post_json` follows no redirects at all (a 3xx is returned, so
+credentials in its headers go nowhere else), and its `timeout` (1 to 600
+seconds) bounds the whole request. `local: true` also lets it reach
+localhost, private networks and any port, for services on the bot's own
+machine such as a local model server: use it only for addresses from
+`config.yml`, never for one a user gave. See [ai.rb](../contrib/plugins/ai.rb).
+
+API keys belong in files, not in settings: `secret_file(name)` reads
+one from the bot's secret folder (`secret/` in an instance, next to the
+pepper). `name` is a plain file name; the file must be private to the
+bot's user (`chmod 600`); it returns the content without surrounding
+whitespace, or raises `Gemdrop::Error` saying what is wrong. Read it
+when you need it, so a changed key works without a reload.
 
 ```ruby
 command "WEATHER", usage: "WEATHER <city>" do |ctx, args|
@@ -569,6 +639,47 @@ end
 
 Payloads are passed as they are, not copied: don't change them in a
 listener.
+
+## Private conversations
+
+Private messages that aren't a command normally get "Unknown command."
+One plugin can take them instead, as a conversation:
+
+```ruby
+private_text do |ctx, words|
+  ctx.reply_privately("You said #{words.size} words: #{ctx.text}")
+end
+```
+
+The block runs like a command (in the plugin's queue, with a `ctx`).
+Only one loaded plugin can have it; a second one fails to load. Text
+whose first word is a password command with a typo or two ("identfy
+secret") never reaches it, so a mistyped password stays with the bot.
+[ai.rb](../contrib/plugins/ai.rb) uses this for private chats.
+
+## Capabilities
+
+IRCv3 capabilities (`account-notify`, `server-time`, `away-notify`,
+`message-tags` ...) are negotiated by the bot for the plugins that want
+them:
+
+```ruby
+wants_cap "account-notify", "server-time"
+
+on :line do |event|
+  next unless cap?("server-time")
+
+  sent_at = event.message.tags["time"]
+end
+```
+
+The bot asks for them when it registers, or as soon as the plugin is
+loaded on a connection that is already up, so no reconnect is needed.
+`caps` lists the enabled ones and `cap?(name)` checks one. A server that
+doesn't offer a capability (or doesn't do CAP at all, like IRCnet's)
+simply never enables it; with no plugin wanting any, the bot doesn't use
+CAP. Message tags are in `event.message.tags`; replies to capabilities
+such as `account-notify` (`ACCOUNT`) arrive as `:line` events.
 
 ## Gems
 

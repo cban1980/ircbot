@@ -66,6 +66,22 @@ class ConfigTest < Minitest::Test
     assert Gemdrop::Config.load(@path)
   end
 
+  def test_secrets_are_found_at_any_depth_but_not_in_lookalike_names
+    File.write(@path, "server: irc.example.net\nplugins:\n  ai:\n    backends:\n      a: { api_key: sk-1 }\n", perm: 0o644)
+    assert_raises(Gemdrop::ConfigError) { Gemdrop::Config.load(@path) }
+
+    File.write(@path, "server: irc.example.net\nplugins:\n  ai:\n    max_tokens: 300\n" \
+                      "    backends:\n      a: { api_key_file: a.key }\n", perm: 0o644)
+    assert Gemdrop::Config.load(@path), "max_tokens and api_key_file are not secrets"
+  end
+
+  def test_secrets_are_hidden_when_shown
+    assert_equal '{"a":{"api_key":"(hidden)","model":"m"}}',
+                 Gemdrop::PluginState.show("backends", { "a" => { "api_key" => "sk-1", "model" => "m" } })
+    assert_equal "(hidden)", Gemdrop::PluginState.show("youtube_api_key", "abc")
+    assert_equal "300", Gemdrop::PluginState.show("max_tokens", 300)
+  end
+
   def test_identity_settings
     config = load(<<~YAML)
       server: irc.example.net

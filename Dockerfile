@@ -13,7 +13,7 @@ ENV LANG=C.UTF-8 \
     GEMDROP_LOG_LEVEL=info
 WORKDIR /app
 COPY lib/ lib/
-COPY bin/gemdrop bin/gemdrop-account bin/
+COPY bin/gemdrop bin/gemdrop-account bin/gemdrop-keeper bin/
 # The bot runs as an unprivileged --user, so the (root-owned) code must be
 # world-readable whatever the permissions were on the build host. It holds
 # no secrets: config, data and the pepper only ever come in via /bot.

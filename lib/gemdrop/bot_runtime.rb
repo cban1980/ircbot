@@ -20,7 +20,7 @@ module Gemdrop
       tls_self_signed tls_known_servers allow_insecure network user realname
     ].freeze
     # Files opened at startup; changing these needs a restart.
-    RESTART_SETTINGS = %w[data_file pepper_file status_file gems_dir hash_workers].freeze
+    RESTART_SETTINGS = %w[data_file pepper_file status_file gems_dir hash_workers keeper_socket].freeze
 
     RECONNECT_MIN = 5
     RECONNECT_MAX = 300
@@ -91,10 +91,12 @@ module Gemdrop
       @wake << :reconnect
     end
 
-    def stop(reason = "Shutting down")
-      @log.info("Stopping: #{reason}")
+    # With a keeper, the bot leaves IRC to it (detach) unless quit: then
+    # the next bot takes over the connection as it is, logins included.
+    def stop(reason = "Shutting down", quit: !keeper?)
+      @log.info("Stopping: #{reason}#{' (the keeper keeps the IRC connection)' unless quit}")
       @stopping = true
-      quit_and_close(reason)
+      quit ? quit_and_close(reason) : detach
       @wake << :stop
     end
 
@@ -108,7 +110,7 @@ module Gemdrop
       @lock.synchronize do
         if @rebuild_connection && @own_connection
           host, port = current_server
-          @conn = Connection.from_config(@config.merge("server" => host, "port" => port))
+          @conn = Bot.connection_for(@config.merge("server" => host, "port" => port), @network_id)
         end
         @rebuild_connection = false
         @dropped_link = false
@@ -121,7 +123,12 @@ module Gemdrop
       @lock.synchronize do
         @connected_at = Time.now.utc
         @link_since = @clock.call
-        register_connection
+        if resumed?
+          @log.info("Took over the IRC connection from the keeper; still on #{host} as before")
+          restore_handoff
+        else
+          register_connection
+        end
       end
       ticker = start_ticker
       while (line = @conn.gets)
@@ -159,8 +166,14 @@ module Gemdrop
       end
     end
 
+    STATUS_HEARTBEAT = 60 # seconds between status updates while connected
+
     def tick
       check_link
+      check_caps
+      # The status file is the health check's heartbeat; server PINGs alone
+      # can be more than its 10 minutes apart on a quiet server.
+      write_status if @welcomed && (@last_heartbeat.nil? || @clock.call - @last_heartbeat >= STATUS_HEARTBEAT)
       process_rejoins
       report_busy_plugins
       if @conn.respond_to?(:take_dropped) && (dropped = @conn.take_dropped).positive?
@@ -174,6 +187,44 @@ module Gemdrop
     end
 
     def intentional_disconnect? = @reconnect_now || @stopping
+
+    def keeper? = @conn.respond_to?(:detach)
+    def resumed? = @conn.respond_to?(:resumed?) && @conn.resumed?
+
+    # --- handing over to the next bot (with a keeper) ------------------------------------------
+
+    def handoff_path = File.join(File.dirname(@config["data_file"]), "handoff-#{Channels.network_key(@network_id)}.json")
+
+    # Leaves the connection to the keeper, with the logins for the next bot.
+    def detach
+      @lock.synchronize do
+        if @welcomed && @conn.respond_to?(:link)
+          state = { "link" => @conn.link, "at" => Time.now.to_i, "sessions" => @accounts.export_sessions,
+                    "secure_users" => @secure_users }
+          File.write("#{handoff_path}.tmp", JSON.generate(state), perm: 0o600)
+          File.rename("#{handoff_path}.tmp", handoff_path)
+        end
+      rescue SystemCallError => e
+        @log.warn("Couldn't save the logins for the next bot: #{e.message}")
+      end
+      @conn.detach
+    end
+
+    # Logins of the bot that had this connection before (same keeper link,
+    # handed over in the last 10 minutes); the file is used once.
+    def restore_handoff
+      state = JSON.parse(File.read(handoff_path))
+      File.delete(handoff_path)
+      return unless state["link"] == @conn.link && Time.now.to_i - state["at"].to_i < 600
+
+      count = @accounts.import_sessions(state["sessions"] || [])
+      (state["secure_users"] || {}).each { |nick_key, userhost| @secure_users[nick_key] = userhost }
+      @log.info("Kept #{count} login(s) from before the restart") if count.positive?
+    rescue Errno::ENOENT
+      nil
+    rescue JSON::ParserError, SystemCallError => e
+      @log.warn("Couldn't read the logins from before the restart: #{e.message}")
+    end
 
     def log_security
       if @conn.first_use?
@@ -239,6 +290,7 @@ module Gemdrop
     # Writes the bot's state for "gemdrop-docker status" and health checks,
     # or hands it to the supervisor, which writes all networks' states.
     def write_status(state = nil)
+      @last_heartbeat = @clock.call
       @status_state = state if state
       @channel_snapshot = @roster.channels_of(@nick).sort.freeze
       now = Time.now.utc

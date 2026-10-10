@@ -39,11 +39,23 @@ module Gemdrop
       end
     end
 
-    # A value as shown to admins; secrets (by setting name) are hidden.
+    # A value as shown to admins; secrets (by name, also inside mappings)
+    # are hidden.
     def self.show(key, value)
-      return "(hidden)" if key.to_s.match?(Config::SECRET_NAME) && !value.to_s.empty?
+      return "(hidden)" if key.to_s.match?(Config::SECRET_NAME) && Config.secret_value?(value)
 
-      JSON.generate(value)
+      JSON.generate(hide_secrets(value))
+    end
+
+    def self.hide_secrets(value)
+      case value
+      when Hash
+        value.to_h do |name, inner|
+          [name, name.to_s.match?(Config::SECRET_NAME) && Config.secret_value?(inner) ? "(hidden)" : hide_secrets(inner)]
+        end
+      when Array then value.map { |inner| hide_secrets(inner) }
+      else value
+      end
     end
 
     attr_reader :network

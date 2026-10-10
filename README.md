@@ -164,7 +164,7 @@ their own text and pages (see [Help](docs/plugins.md#help)).
 | `IDENTIFY [account] <password>`, `PASSWORD <old> <new>` | anyone on TLS |
 | `LOGOUT`, `WHOAMI` | anyone |
 | `PLUGIN LIST` / `LOAD <name>` / `UNLOAD <name>` / `RELOAD [name]` | bot admins (see [Plugins](#plugins)) |
-| `PLUGIN SETTINGS <name>` / `SET <name> <setting> <value>` / `UNSET <name> <setting>` | bot admins |
+| `PLUGIN SETTINGS <name>` / `SET <name> [#chan] <setting> <value>` / `UNSET <name> [#chan] <setting>` | bot admins |
 
 ### Channel services
 
@@ -215,11 +215,25 @@ bin/gemdrop-docker reconnect                   # new IRC connection
 bin/gemdrop-docker channel register '#chan' <owner>   # the bot joins right away
 bin/gemdrop-docker plugin install contrib/plugins/dice.rb   # loads it right away
 bin/gemdrop-docker plugin list                 # loaded plugins, commands, load errors
-bin/gemdrop-docker restart                     # checks the config first
+bin/gemdrop-docker restart                     # checks the config first; stays on IRC (see below)
 bin/gemdrop-docker update                      # git pull main, rebuild on a fresh base image, restart
 bin/gemdrop-docker test                        # run the test suite on trixie
 bin/gemdrop-docker --help                      # everything else
 ```
+
+**Restarts don't leave IRC.** The IRC connections are held by a small
+second container, `gemdrop-keeper` ([lib/gemdrop/keeper.rb](lib/gemdrop/keeper.rb)),
+so `restart` and `update` replace the bot's container while the keeper
+keeps it on every network: no quit, no rejoin, same nick, and logins
+carry over. Messages that arrive while the bot restarts are buffered and
+answered when it is back a few seconds later; even a crashed bot is
+replaced this way (only its logins are lost). `stop` ends both and quits
+IRC (`stop --keep-irc` stops just the bot). The keeper rarely changes;
+when an update does change it, `restart` and `status` say so, and
+`restart --all` applies it, leaving and rejoining IRC once. `logs
+--keeper` shows its log. Without Docker: run `bin/gemdrop-keeper
+SOCKET` and give the bot `keeper_socket: SOCKET` (or
+`GEMDROP_KEEPER_SOCKET`).
 
 **Live reload** (`reload`, `edit`, `channel register|drop`): the bot
 re-reads `config.yml` on SIGHUP. Admins, channels (joined/parted),
@@ -227,8 +241,9 @@ nick, user modes, link previews and limits apply immediately; changes to
 server, TLS, network, user or realname make it reconnect. New and
 changed plugin files are loaded too, without reconnecting. An invalid
 config is refused and the bot keeps running with the old one (the script
-also checks before sending). `data_file`, `pepper_file` and
-`status_file` need a `restart`. Account changes never need a reload.
+also checks before sending). `data_file`, `pepper_file`, `status_file`
+and the like need a `restart`, which (see above) doesn't leave IRC
+either. Account changes never need a reload.
 
 **Moving to another server:** `bin/gemdrop-docker backup` writes one
 archive with `config.yml`, `data/`, `secret/` and `plugins/` (keep it private: it
@@ -239,8 +254,9 @@ new machine.
 
 The container runs as your user (files stay yours), with a read-only
 filesystem, no capabilities, `no-new-privileges`, memory and process
-limits, log rotation, a health check (connected, with server activity in
-the last 10 minutes) and `--restart unless-stopped`. Config, data and
+limits, log rotation, a health check (connected, with the status
+updated in the last 10 minutes) and `--restart unless-stopped`. The keeper
+runs the same way, in its own container. Config, data and
 secrets are excluded from the image (`.dockerignore`).
 
 ## CTCP
@@ -312,6 +328,8 @@ PLUGIN SET links message_type notice   # saved; the plugin reloads with it
 PLUGIN SET links only_channels [#linux.se, #gunnit]
 PLUGIN SETTINGS links                  # current values; saved ones are marked
 PLUGIN UNSET links message_type        # back to config.yml's value
+PLUGIN SET ai #linux.se language Swedish   # for one channel (settings that allow it)
+PLUGIN UNSET ai #linux.se language
 
 # from the shell: every network, or one with -n
 bin/gemdrop-docker plugin unload ops
@@ -392,7 +410,7 @@ The plugin API covers much more than commands:
 The full reference is **[docs/plugins.md](docs/plugins.md)**. Examples in
 [contrib/plugins/](contrib/plugins/): `dice` (commands), `ops` (`!kick`, `!kb`, `!ban`, `!topic` for channel ops),
 `chanlog` (channel logs to files), `relay` (chat between channels on
-different networks), `links` (link previews), `help`, `chanserv`, `ctcp` and `eventlog` (a
+different networks), `links` (link previews), `help`, `chanserv`, `ctcp`, `ai` (chat through any AI backend; see [docs/ai.md](docs/ai.md)) and `eventlog` (a
 structured, machine-readable log of everything, with a query API for
 other plugins; see [docs/eventlog.md](docs/eventlog.md)).
 

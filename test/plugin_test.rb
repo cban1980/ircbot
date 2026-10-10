@@ -375,4 +375,17 @@ class PluginTest < Minitest::Test
       assert_raises(Gemdrop::ConfigError) { Gemdrop::Config.load(path) }.then { |e| assert_match(error, e.message) }
     end
   end
+
+  # Plugins written before channel: true existed keep their own channel_settings.
+  def test_a_plugin_may_handle_channel_settings_itself
+    write_plugin("oldstyle", <<~RUBY)
+      class Oldstyle < Gemdrop::Plugin
+        setting "channel_settings", default: {}, type: :hash
+        command("SHOW") { |ctx, _args| ctx.reply_privately(settings["channel_settings"].keys.join(",")) }
+      end
+    RUBY
+    start(%(plugins:\n  oldstyle:\n    channel_settings:\n      "#c": { anything: 1 }\n))
+    say("alice", "SHOW")
+    assert_equal ["#c"], notices_to("alice")
+  end
 end

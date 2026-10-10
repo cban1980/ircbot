@@ -44,40 +44,36 @@ class Links < Gemdrop::Plugin
     "reddit" => "[Reddit] {title}{ · |author|}"
   }.freeze
 
-  setting "message_type", default: "privmsg", values: %w[privmsg notice]
-  setting "only_channels", default: [], type: :list
-  setting "ignore_channels", default: [], type: :list
-  setting "ignore_nicks", default: [], type: :list
-  setting "ignore_masks", default: [], type: :list
-  setting "only_domains", default: [], type: :list
-  setting "ignore_domains", default: [], type: :list
-  setting "ignore_prefixes", default: [], type: :list
-  setting "skip_word", default: "nopreview", type: :string
-  setting "private_messages", default: false, type: :boolean
-  setting "actions", default: true, type: :boolean
-  setting "sites", default: SITES, type: :list
-  setting "pages", default: true, type: :boolean
-  setting "files", default: true, type: :boolean
-  setting "title_source", default: "title", values: %w[title og]
-  setting "show_description", default: false, type: :boolean
-  setting "skip_title_in_url", default: false, type: :boolean
-  setting "bold", default: false, type: :boolean
-  setting "title_length", default: 200, type: :integer, min: 20, max: 400
-  setting "description_length", default: 150, type: :integer, min: 20, max: 400
-  setting "max_length", default: 350, type: :integer, min: 40, max: 400
-  setting "max_urls", default: 3, type: :integer, min: 1, max: 10
-  setting "per_channel_per_minute", default: 6, type: :integer, min: 1
-  setting "per_user_per_minute", default: 3, type: :integer, min: 1
-  setting "repeat_minutes", default: 10, type: :integer, min: 0
+  setting "message_type", default: "privmsg", values: %w[privmsg notice], channel: true
+  setting "only_channels", default: [], type: :list, channel: true
+  setting "ignore_channels", default: [], type: :list, channel: true
+  setting "ignore_nicks", default: [], type: :list, channel: true
+  setting "ignore_masks", default: [], type: :list, channel: true
+  setting "only_domains", default: [], type: :list, channel: true
+  setting "ignore_domains", default: [], type: :list, channel: true
+  setting "ignore_prefixes", default: [], type: :list, channel: true
+  setting "skip_word", default: "nopreview", type: :string, channel: true
+  setting "private_messages", default: false, type: :boolean, channel: true
+  setting "actions", default: true, type: :boolean, channel: true
+  setting "sites", default: SITES, type: :list, channel: true
+  setting "pages", default: true, type: :boolean, channel: true
+  setting "files", default: true, type: :boolean, channel: true
+  setting "title_source", default: "title", values: %w[title og], channel: true
+  setting "show_description", default: false, type: :boolean, channel: true
+  setting "skip_title_in_url", default: false, type: :boolean, channel: true
+  setting "bold", default: false, type: :boolean, channel: true
+  setting "title_length", default: 200, type: :integer, min: 20, max: 400, channel: true
+  setting "description_length", default: 150, type: :integer, min: 20, max: 400, channel: true
+  setting "max_length", default: 350, type: :integer, min: 40, max: 400, channel: true
+  setting "max_urls", default: 3, type: :integer, min: 1, max: 10, channel: true
+  setting "per_channel_per_minute", default: 6, type: :integer, min: 1, channel: true
+  setting "per_user_per_minute", default: 3, type: :integer, min: 1, channel: true
+  setting "repeat_minutes", default: 10, type: :integer, min: 0, channel: true
   setting "cache_minutes", default: 30, type: :integer, min: 0
   setting "history_size", default: 25, type: :integer, min: 0, max: 500
-  setting "formats", default: {}, type: :hash
-  setting "channel_settings", default: {}, type: :hash
+  setting "formats", default: {}, type: :hash, channel: true
   setting "youtube_api_key", type: :string
   setting "github_token", type: :string
-
-  # Settings that channel_settings can't change.
-  GLOBAL_ONLY = %w[channel_settings youtube_api_key github_token cache_minutes history_size].freeze
 
   URL = %r{\bhttps?://[^<>"\x00-\x20\x7f]+}i
   YOUTUBE_HOSTS = %w[
@@ -101,7 +97,6 @@ class Links < Gemdrop::Plugin
     unknown_formats = settings["formats"].keys - FORMATS.keys
     raise Gemdrop::Error, "unknown formats: #{unknown_formats.join(', ')} (known: #{FORMATS.keys.join(', ')})" if unknown_formats.any?
 
-    check_channel_settings!
     @lock = Mutex.new # cache and history; previews finish on worker threads
     @cache = {}
     @limiters = {}
@@ -113,7 +108,7 @@ class Links < Gemdrop::Plugin
   def teardown = save
 
   on(:message) { |event| consider(event, event.channel) }
-  on(:action) { |event| consider(event, event.channel) if event.channel ? options(event.channel)["actions"] : false }
+  on(:action) { |event| consider(event, event.channel) if event.channel ? settings_for(event.channel)["actions"] : false }
 
   on(:private_message) do |event|
     next unless settings["private_messages"]
@@ -134,7 +129,7 @@ class Links < Gemdrop::Plugin
 
   command "TITLE", usage: "TITLE <url>", help: "preview a link", aliases: %w[PREVIEW], cooldown: 5 do |ctx, args|
     url = extract_urls(args.join(" ")).first or ctx.usage!
-    opts = options(ctx.channel)
+    opts = settings_for(ctx.channel)
     queued = background do
       line = preview_line(url, opts)
       line ? ctx.reply(line) : ctx.reply_privately("No preview for #{url}.")
@@ -165,7 +160,7 @@ class Links < Gemdrop::Plugin
   private
 
   def consider(event, channel)
-    opts = options(channel)
+    opts = settings_for(channel)
     return if event.nick.nil? || Gemdrop::Casemap.eq?(event.nick, bot_nick)
     return if channel && !channel_wanted?(channel, opts)
     return if ignored_user?(event, opts)
@@ -199,14 +194,6 @@ class Links < Gemdrop::Plugin
 
   def send_preview(target, line, opts)
     opts["message_type"] == "notice" ? notice(target, line) : say(target, line)
-  end
-
-  # The settings for a channel: channel_settings on top of the plugin's.
-  def options(channel)
-    return settings unless channel
-
-    overrides = settings["channel_settings"].find { |name, _| Gemdrop::Casemap.eq?(name, channel) }&.last
-    overrides ? settings.merge(overrides) : settings
   end
 
   def channel_wanted?(channel, opts)
@@ -602,22 +589,4 @@ class Links < Gemdrop::Plugin
   def escape(text) = URI.encode_www_form_component(text)
 
   def key(name) = Gemdrop::Casemap.downcase(name)
-
-  def check_channel_settings!
-    settings["channel_settings"].each do |channel, overrides|
-      raise Gemdrop::Error, "channel_settings: #{channel.inspect} is not a channel" unless channel.to_s.match?(Gemdrop::Channels::NAME)
-      raise Gemdrop::Error, "channel_settings: #{channel} must be a mapping" unless overrides.is_a?(Hash)
-
-      unknown = overrides.keys - self.class.settings_spec.keys
-      raise Gemdrop::Error, "channel_settings: #{channel}: unknown setting(s) #{unknown.join(', ')}" if unknown.any?
-
-      global = overrides.keys & GLOBAL_ONLY
-      raise Gemdrop::Error, "channel_settings: #{channel}: #{global.join(', ')} can't be set per channel" if global.any?
-
-      overrides.each do |name, value|
-        problem = __send__(:setting_problem, self.class.settings_spec[name], value)
-        raise Gemdrop::Error, "channel_settings: #{channel}: #{name} #{problem}" if problem
-      end
-    end
-  end
 end

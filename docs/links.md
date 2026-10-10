@@ -117,7 +117,10 @@ bot refuses to start otherwise.
 
 ### Per channel
 
-`channel_settings` overrides any of the settings above for one channel,
+`channel_settings` overrides any of the settings above for one channel
+(on every network, or under a network's name for that network only, as
+in [docs/plugins.md](plugins.md#per-channel); live: `PLUGIN SET links
+#chan <setting> <value>`),
 except `channel_settings`, the keys, `cache_minutes` and `history_size`:
 
 ```yaml
