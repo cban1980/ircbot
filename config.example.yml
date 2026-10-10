@@ -6,6 +6,9 @@
 # An IRCnet server with a TLS port that accepts your IP address.
 server: irc.example.net
 port: 6697
+# Optional: more servers to try, in order, when the one above can't be
+# reached ("host" uses the port above; "host:port" another one).
+fallback_servers: []
 # Only join channels if the server confirms this network name.
 network: IRCnet
 
@@ -57,12 +60,16 @@ umodes: "+i"
 
 # --- Storage ---------------------------------------------------------------
 # Relative paths are resolved against this file's directory.
-data_file: data/ircbot.json
+data_file: data/rubicon.json
 
 # Secret key mixed into every password hash; generated on first start.
 # Keep it apart from data backups. Losing it makes every account unusable.
-# IRCBOT_PEPPER (64+ hex chars) in the environment overrides this file.
+# RUBICON_PEPPER (64+ hex chars) in the environment overrides this file.
 pepper_file: secret/pepper.key
+
+# Processes that check passwords (scrypt, ~200 ms and ~64 MB each), so
+# logins run in parallel and never stall the bot. 0: in the bot's process.
+hash_workers: 2
 
 # --- Access ----------------------------------------------------------------
 # Bot accounts (registered with the bot via REGISTER) that can register
@@ -81,11 +88,11 @@ channels:
 # answer other CTCP commands (see docs/plugins.md).
 ctcp:
   enabled: true
-  version: "ircbot (Ruby)"
+  version: "Rubicon (Ruby)"
 
 # --- Plugins -----------------------------------------------------------------
 # Ruby files in plugins_dir (one plugin per file, e.g. plugins/dice.rb;
-# examples in contrib/plugins/). Reloading the config ("ircbot-docker
+# examples in contrib/plugins/). Reloading the config ("rubicon-docker
 # reload") loads new files and reloads changed ones without reconnecting.
 # Plugins run with the bot's full privileges: only install code you trust.
 # Writing plugins: docs/plugins.md.
@@ -109,7 +116,7 @@ plugins:
   # links:
   #   message_type: privmsg   # or notice, which other bots never answer
   #   ignore_nicks: []        # e.g. other bots
-  #   youtube_api_key:        # duration and views; or IRCBOT_YOUTUBE_API_KEY
+  #   youtube_api_key:        # duration and views; or RUBICON_YOUTUBE_API_KEY
   # dice:
   #   prefix: "!"
   #   max_dice: 20

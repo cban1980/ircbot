@@ -56,10 +56,11 @@ class SafeHttpTest < Minitest::Test
       "/image" => endless("image/png"),
       "/to-title" => respond("302 Found", { "Location" => "/title" }),
       "/to-internal" => ->(c) { respond("302 Found", { "Location" => "http://internal.test:#{@server.port}/title" }).call(c) },
+      "/to-other" => ->(c) { respond("302 Found", { "Location" => "http://other.test:#{@server.port}/title" }).call(c) },
       "/loop" => respond("302 Found", { "Location" => "/loop" })
     )
-    dns = { "public.test" => ["127.0.0.1"], "internal.test" => ["10.0.0.1"] }
-    @http = IRCBot::SafeHttp.new(
+    dns = { "public.test" => ["127.0.0.1"], "other.test" => ["127.0.0.1"], "internal.test" => ["10.0.0.1"] }
+    @http = Rubicon::SafeHttp.new(
       user_agent: "test-agent",
       resolver: ->(host) { dns.fetch(host) },
       blocked_ranges: [IPAddr.new("10.0.0.0/8")], # let the local test server through
@@ -108,25 +109,48 @@ class SafeHttpTest < Minitest::Test
     assert_equal url("/title"), response.url
   end
 
+  def test_extra_headers_only_go_to_the_same_origin
+    @http.get(url("/to-title"), headers: { "Authorization" => "Bearer T" })
+    assert(@server.requests.all? { |_path, headers| headers.include?("Authorization: Bearer T") },
+           "same host, scheme and port: sent on every hop")
+
+    @server.requests.clear
+    @http.get(url("/to-other"), headers: { "Authorization" => "Bearer T" })
+    (first, first_headers), (second, second_headers) = @server.requests
+    assert_equal ["/to-other", "/title"], [first, second]
+    assert_includes first_headers, "Authorization: Bearer T"
+    refute(second_headers.any? { |h| h.start_with?("Authorization") }, "never to another host")
+
+    https = URI("https://api.example.com/x")
+    refute @http.send(:same_origin?, URI("http://api.example.com/x"), https), "never over http after https"
+    refute @http.send(:same_origin?, URI("https://api.example.com:8443/x"), https)
+    assert @http.send(:same_origin?, URI("https://API.example.com/y"), https)
+  end
+
+  def test_reserved_headers_are_refused
+    assert_raises(ArgumentError) { @http.get(url("/title"), headers: { "Host" => "evil.test" }) }
+    assert_raises(ArgumentError) { @http.get(url("/title"), headers: { "X-A" => "1\r\nX-B: 2" }) }
+  end
+
   def test_redirect_to_internal_address_is_refused
-    error = assert_raises(IRCBot::SafeHttp::Refused) { @http.get(url("/to-internal")) }
+    error = assert_raises(Rubicon::SafeHttp::Refused) { @http.get(url("/to-internal")) }
     assert_match(/non-public/, error.message)
   end
 
   def test_redirect_loop_is_refused
-    assert_raises(IRCBot::SafeHttp::Refused) { @http.get(url("/loop")) }
+    assert_raises(Rubicon::SafeHttp::Refused) { @http.get(url("/loop")) }
   end
 end
 
 # Address and URL checks with the real (default) blocklist.
 class SafeHttpPolicyTest < Minitest::Test
   def http_resolving_to(*addresses)
-    IRCBot::SafeHttp.new(user_agent: "t", resolver: ->(_host) { addresses })
+    Rubicon::SafeHttp.new(user_agent: "t", resolver: ->(_host) { addresses })
   end
 
   def test_refuses_non_public_addresses
     %w[127.0.0.1 10.1.2.3 172.16.0.1 192.168.1.1 169.254.169.254 100.64.0.1 0.0.0.0 224.0.0.1].each do |address|
-      error = assert_raises(IRCBot::SafeHttp::Refused, address) { http_resolving_to(address).vetted_address("x.test") }
+      error = assert_raises(Rubicon::SafeHttp::Refused, address) { http_resolving_to(address).vetted_address("x.test") }
       assert_match(/non-public/, error.message)
     end
   end
@@ -138,7 +162,7 @@ class SafeHttpPolicyTest < Minitest::Test
   def test_ignores_ipv6_results
     assert_equal "93.184.216.34", http_resolving_to("::1", "2606:2800:220:1::1", "93.184.216.34").vetted_address("x.test")
 
-    error = assert_raises(IRCBot::SafeHttp::Refused) { http_resolving_to("2606:2800:220:1::1").vetted_address("x.test") }
+    error = assert_raises(Rubicon::SafeHttp::Refused) { http_resolving_to("2606:2800:220:1::1").vetted_address("x.test") }
     assert_match(/no IPv4 address/, error.message)
   end
 
@@ -146,12 +170,12 @@ class SafeHttpPolicyTest < Minitest::Test
     http = http_resolving_to("93.184.216.34")
 
     %w[http://[::1]/ http://[2606:2800:220:1::1]/ https://[::ffff:127.0.0.1]/].each do |url|
-      assert_raises(IRCBot::SafeHttp::Refused, url) { http.check_uri(url) }
+      assert_raises(Rubicon::SafeHttp::Refused, url) { http.check_uri(url) }
     end
   end
 
   def test_refuses_if_any_resolved_address_is_internal
-    assert_raises(IRCBot::SafeHttp::Refused) { http_resolving_to("93.184.216.34", "127.0.0.1").vetted_address("x.test") }
+    assert_raises(Rubicon::SafeHttp::Refused) { http_resolving_to("93.184.216.34", "127.0.0.1").vetted_address("x.test") }
   end
 
   def test_refuses_unsafe_urls
@@ -159,7 +183,7 @@ class SafeHttpPolicyTest < Minitest::Test
 
     ["ftp://example.com/", "file:///etc/passwd", "http://user:pw@example.com/",
      "http://example.com:8080/", "https://example.com:22/", "http:///nohost", "http://exa mple.com/"].each do |url|
-      assert_raises(IRCBot::SafeHttp::Refused, url) { http.check_uri(url) }
+      assert_raises(Rubicon::SafeHttp::Refused, url) { http.check_uri(url) }
     end
     assert http.check_uri("https://example.com/path?q=1")
   end

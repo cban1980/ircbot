@@ -5,7 +5,7 @@ class AccountsTest < Minitest::Test
 
   def setup
     super
-    @accounts = IRCBot::Accounts.new(@store, TEST_HASHER)
+    @accounts = Rubicon::Accounts.new(@store, TEST_HASHER)
   end
 
   def data_path = File.join(@tmpdir, "data.json")
@@ -21,8 +21,8 @@ class AccountsTest < Minitest::Test
   def test_rejects_duplicate_and_short_passwords
     @accounts.register("alice", "correct horse")
 
-    assert_raises(IRCBot::Error) { @accounts.register("ALICE", "another password") }
-    assert_raises(IRCBot::Error) { @accounts.register("bob", "short") }
+    assert_raises(Rubicon::Error) { @accounts.register("ALICE", "another password") }
+    assert_raises(Rubicon::Error) { @accounts.register("bob", "short") }
   end
 
   def test_password_is_not_stored_in_plain_text
@@ -36,26 +36,26 @@ class AccountsTest < Minitest::Test
 
   def test_store_creates_private_directory
     path = File.join(@tmpdir, "nested", "data.json")
-    IRCBot::Accounts.new(IRCBot::Store.new(path), TEST_HASHER)
+    Rubicon::Accounts.new(Rubicon::Store.new(path), TEST_HASHER)
 
     assert_equal 0o700, File.stat(File.dirname(path)).mode & 0o777
   end
 
   def test_rejects_password_containing_account_name
-    assert_raises(IRCBot::Error) { @accounts.register("alice", "xxAlice123") }
+    assert_raises(Rubicon::Error) { @accounts.register("alice", "xxAlice123") }
   end
 
   def test_different_pepper_is_refused
     @accounts.register("alice", "correct horse")
-    other = IRCBot::PasswordHasher.new(pepper: "q" * 32, log_n: 4)
+    other = Rubicon::PasswordHasher.new(pepper: "q" * 32, log_n: 4)
 
-    assert_raises(IRCBot::ConfigError) { IRCBot::Accounts.new(IRCBot::Store.new(data_path), other) }
+    assert_raises(Rubicon::ConfigError) { Rubicon::Accounts.new(Rubicon::Store.new(data_path), other) }
   end
 
   def test_rehashes_when_cost_changes
     @accounts.register("alice", "correct horse")
-    stronger = IRCBot::PasswordHasher.new(pepper: TEST_PEPPER, log_n: 5)
-    upgraded = IRCBot::Accounts.new(IRCBot::Store.new(data_path), stronger)
+    stronger = Rubicon::PasswordHasher.new(pepper: TEST_PEPPER, log_n: 5)
+    upgraded = Rubicon::Accounts.new(Rubicon::Store.new(data_path), stronger)
 
     assert_equal "alice", upgraded.authenticate("alice", "correct horse")
     assert_match(/"scrypt\$5\$/, File.read(data_path))
@@ -68,7 +68,7 @@ class AccountsTest < Minitest::Test
 
     assert_equal "alice", @accounts.authenticate("alice", "battery staple")
     assert_nil @accounts.authenticate("alice", "correct horse")
-    assert_raises(IRCBot::Error) { @accounts.set_password("alice", "short") }
+    assert_raises(Rubicon::Error) { @accounts.set_password("alice", "short") }
   end
 
   def test_session_is_bound_to_userhost
@@ -89,7 +89,7 @@ class AccountsTest < Minitest::Test
 
   def test_accounts_persist_across_reload
     @accounts.register("alice", "correct horse")
-    reloaded = IRCBot::Accounts.new(IRCBot::Store.new(data_path), TEST_HASHER)
+    reloaded = Rubicon::Accounts.new(Rubicon::Store.new(data_path), TEST_HASHER)
 
     assert_equal "alice", reloaded.authenticate("alice", "correct horse")
   end

@@ -5,7 +5,7 @@ require "test_helper"
 class LinksPluginTest < Minitest::Test
   include StoreHelper
 
-  Response = IRCBot::SafeHttp::Response
+  Response = Rubicon::SafeHttp::Response
 
   # Returns canned responses by URL prefix and records what was fetched.
   class FakeHttp
@@ -19,7 +19,7 @@ class LinksPluginTest < Minitest::Test
       @fetched << url
       @headers << headers
       _prefix, response = @routes.find { |prefix, _| url.start_with?(prefix) }
-      raise IRCBot::SafeHttp::Refused, "no route" unless response
+      raise Rubicon::SafeHttp::Refused, "no route" unless response
 
       response
     end
@@ -45,7 +45,7 @@ class LinksPluginTest < Minitest::Test
         links:
     YAML
     @conn = FakeConnection.new
-    @bot = IRCBot::Bot.new(IRCBot::Config.load(path), connection: @conn, store: @store, hasher: TEST_HASHER,
+    @bot = Rubicon::Bot.new(Rubicon::Config.load(path), connection: @conn, store: @store, hasher: TEST_HASHER,
                                                        http: @http, plugin_pool: InlinePool.new, logger: Logger.new(nil))
     @bot.handle(":server 001 ModeBot :Welcome")
     @bot.handle(":ModeBot!bot@host JOIN #chan")
@@ -77,10 +77,10 @@ class LinksPluginTest < Minitest::Test
   # The line the plugin would post for a URL (fetching through FakeHttp).
   # Runs as a background job would; http_get refuses to run elsewhere.
   def preview(url)
-    Thread.current[:ircbot_background] = true
+    Thread.current[:rubicon_background] = true
     plugin.send(:preview_line, url, plugin.settings).tap { plugin.instance_variable_get(:@cache).clear }
   ensure
-    Thread.current[:ircbot_background] = nil
+    Thread.current[:rubicon_background] = nil
   end
 
   # --- finding links ------------------------------------------------------------------
@@ -429,7 +429,7 @@ class LinksPluginTest < Minitest::Test
 
   def test_publishes_previews_to_other_plugins
     File.write(File.join(@plugins_dir, "listener.rb"), <<~RUBY, perm: 0o600)
-      class Listener < IRCBot::Plugin
+      class Listener < Rubicon::Plugin
         attr_reader :got
         listen("link") { |payload, _info| (@got ||= []) << payload }
       end

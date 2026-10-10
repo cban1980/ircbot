@@ -14,7 +14,7 @@ class PasswordHasherTest < Minitest::Test
 
   def test_hash_is_useless_without_the_pepper
     stored = TEST_HASHER.hash("correct horse")
-    other = IRCBot::PasswordHasher.new(pepper: "q" * 32, log_n: 4)
+    other = Rubicon::PasswordHasher.new(pepper: "q" * 32, log_n: 4)
 
     refute other.verify("correct horse", stored)
   end
@@ -26,13 +26,13 @@ class PasswordHasherTest < Minitest::Test
   end
 
   def test_rejects_short_pepper
-    assert_raises(ArgumentError) { IRCBot::PasswordHasher.new(pepper: "short") }
+    assert_raises(ArgumentError) { Rubicon::PasswordHasher.new(pepper: "short") }
   end
 end
 
 class PepperTest < Minitest::Test
   def setup
-    @tmpdir = Dir.mktmpdir("ircbot-pepper")
+    @tmpdir = Dir.mktmpdir("rubicon-pepper")
     @path = File.join(@tmpdir, "secret", "pepper.key")
   end
 
@@ -41,29 +41,29 @@ class PepperTest < Minitest::Test
   end
 
   def test_generates_private_key_file_once
-    first = IRCBot::Pepper.load(path: @path, env: {})
+    first = Rubicon::Pepper.load(path: @path, env: {})
 
     assert_equal 32, first.bytesize
     assert_equal 0o600, File.stat(@path).mode & 0o777
     assert_equal 0o700, File.stat(File.dirname(@path)).mode & 0o777
-    assert_equal first, IRCBot::Pepper.load(path: @path, env: {})
+    assert_equal first, Rubicon::Pepper.load(path: @path, env: {})
   end
 
   def test_env_takes_precedence
     hex = "ab" * 32
 
-    assert_equal [hex].pack("H*"), IRCBot::Pepper.load(path: @path, env: { "IRCBOT_PEPPER" => hex })
+    assert_equal [hex].pack("H*"), Rubicon::Pepper.load(path: @path, env: { "RUBICON_PEPPER" => hex })
     refute File.exist?(@path)
   end
 
   def test_refuses_world_readable_key_file
-    IRCBot::Pepper.load(path: @path, env: {})
+    Rubicon::Pepper.load(path: @path, env: {})
     File.chmod(0o644, @path)
 
-    assert_raises(IRCBot::ConfigError) { IRCBot::Pepper.load(path: @path, env: {}) }
+    assert_raises(Rubicon::ConfigError) { Rubicon::Pepper.load(path: @path, env: {}) }
   end
 
   def test_refuses_short_pepper
-    assert_raises(IRCBot::ConfigError) { IRCBot::Pepper.load(path: @path, env: { "IRCBOT_PEPPER" => "abcd" }) }
+    assert_raises(Rubicon::ConfigError) { Rubicon::Pepper.load(path: @path, env: { "RUBICON_PEPPER" => "abcd" }) }
   end
 end

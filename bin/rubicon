@@ -1,0 +1,55 @@
+#!/usr/bin/env ruby
+# Runs the bot.
+#
+#   bin/rubicon [CONFIG]           run (default config: ../config.yml)
+#   bin/rubicon --check [CONFIG]   validate the config and files, then exit
+#
+# Connects to every network in the config at once. While running: SIGHUP
+# reloads the config (adding or removing networks), SIGUSR1 reconnects,
+# SIGTERM or SIGINT quits IRC cleanly and exits.
+$LOAD_PATH.unshift File.expand_path("../lib", __dir__)
+require "rubicon"
+
+abort "rubicon: refusing to run as root; use an unprivileged account" if Process.euid.zero?
+File.umask(0o077) # everything the bot creates is private to its user
+
+check_only = ARGV.delete("--check")
+config_path = File.expand_path(ARGV[0] || File.expand_path("../config.yml", __dir__))
+
+$stdout.sync = true
+logger = Logger.new($stdout)
+logger.level = ENV["RUBICON_LOG_LEVEL"] || ENV["IRCBOT_LOG_LEVEL"] || "info"
+logger.formatter = Rubicon::LogFormatter.new
+
+begin
+  config = Rubicon::Config.load(config_path)
+  if check_only
+    # Opening the data store and pepper checks permissions and the pepper match.
+    store = Rubicon::Store.new(config["data_file"])
+    hasher = Rubicon::PasswordHasher.new(pepper: Rubicon::Pepper.load(path: config["pepper_file"]))
+    accounts = Rubicon::Accounts.new(store, hasher)
+    # Read-only: channels from before networks existed are listed under the
+    # first network, where the bot moves them when it starts.
+    legacy = store.read { |data| (data["channels"] || {}).values.map { |c| c["name"] } }
+    puts "Config OK: #{config_path}"
+    puts "  admins:   #{config['admins'].join(', ').then { |s| s.empty? ? 'none' : s }}"
+    puts "  accounts: #{accounts.names.size}"
+    config["networks"].each_with_index do |net, index|
+      registered = Rubicon::Channels.new(store, network: net["id"]).names + (index.zero? ? legacy : [])
+      puts "  network #{net['id']}:"
+      puts "    server:   #{net['server']}:#{net['port']} (network name: #{net['network'] || 'not checked'})"
+      puts "    nick:     #{net['nick']}  user: #{net['user']}  realname: #{net['realname']}"
+      puts "    channels: #{(net['channels'] + registered).uniq.join(' ').then { |s| s.empty? ? 'none' : s }}"
+    end
+    # Plugin problems are reported but don't fail the check: the bot runs
+    # without a broken plugin.
+    plugins = Rubicon::PluginManager.check(config["plugins_dir"], config["plugins"])
+    puts "  plugins:  #{plugins.empty? ? "none in #{config['plugins_dir']}" : plugins.keys.join(' ')}"
+    plugins.each { |name, problem| puts "    #{name}: #{problem}" if problem }
+    exit 0
+  end
+
+  Rubicon::Supervisor.new(config, config_path: config_path, logger: logger).run
+rescue Rubicon::ConfigError, Psych::Exception => e
+  abort "rubicon: #{e.message}"
+end

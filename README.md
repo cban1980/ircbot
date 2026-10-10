@@ -1,6 +1,6 @@
-# ircbot
+# Rubicon
 
-A Ruby IRC bot for IRCnet that handles user registration and channel
+Rubicon (formerly "ircbot") is a Ruby IRC bot for IRCnet that handles user registration and channel
 access (op/voice). It uses only the Ruby standard library; minitest and
 rake are needed for tests.
 
@@ -8,8 +8,8 @@ rake are needed for tests.
 
 ```sh
 cp config.example.yml config.yml   # set server, nick, admins, channels
-bin/ircbot                         # or: bin/ircbot path/to/config.yml
-IRCBOT_LOG_LEVEL=debug bin/ircbot  # log raw traffic (passwords are redacted)
+bin/rubicon                         # or: bin/rubicon path/to/config.yml
+RUBICON_LOG_LEVEL=debug bin/rubicon  # log raw traffic (passwords are redacted)
 ```
 
 The bot's identity is set in `config.yml`: `nick` plus fallback
@@ -26,6 +26,12 @@ IRCnet has no services, so nobody can register channels or op the bot
 for you. Op the bot by hand in each channel; it keeps auto-opping
 registered users from there. If the bot loses op (netsplit, kick), an op
 has to give it back.
+
+If the bot is kicked, or can't join (banned, invite-only, full, wrong
+key), it logs why and tries again by itself after 5 seconds, waiting
+twice as long after each further failure (up to 10 minutes) until it is
+back in. This applies to configured and registered channels and to
+channels plugins joined.
 
 ## Several networks
 
@@ -59,25 +65,77 @@ Per network: `server`, `network`, `port`, the `tls_*` settings,
   network, but users IDENTIFY on each network separately.
 - **Channels belong to one network.** `#foo` on IRCnet and `#foo` on EFnet
   are registered, owned and managed separately, on the network you send
-  the command on. Locally: `ircbot-account -n EFnet channel-register ...`
-  (or `ircbot-docker channel -n EFnet register ...`).
+  the command on. Locally: `rubicon-account -n EFnet channel-register ...`
+  (or `rubicon-docker channel -n EFnet register ...`).
 - **Plugins** run separately on each network, with their data in
-  `data/plugins/<network>/`. `PLUGIN` commands act on the network they are
-  sent on; a config reload acts on all.
-- A config reload (`ircbot-docker reload`) connects to added networks and
+  `data/plugins/<network>/` (lower case, e.g. `data/plugins/ircnet/`). `PLUGIN` commands act on the network they are
+  sent on, and what they change (unloads, saved settings) is remembered
+  for that network across restarts; a config reload acts on all.
+- A config reload (`rubicon-docker reload`) connects to added networks and
   leaves removed ones. A network that fails for good (e.g. a server on the
   wrong network) stops on its own; the others keep running.
-- Logs are prefixed with the network, and `ircbot-docker status` shows
+- Logs are prefixed with the network, and `rubicon-docker status` shows
   each one. The health check is only healthy when every network is
   connected.
 - Without `networks:`, the config is one network as before. Channels
   registered before networks existed move to the first network on the
   first start; older versions of the bot can't read the data file after
-  that, so back it up first (`ircbot-docker backup`).
+  that, so back it up first (`rubicon-docker backup`).
 
 **First start:** the names in `admins` are bot accounts. Connect with that
 nick over TLS and `/msg ModeBot REGISTER <password>` straight away so
 nobody else claims it.
+
+## Staying up
+
+- **Dead connections are noticed within ~3.5 minutes:** after 2 minutes
+  without a word from the server the bot pings it, and without an
+  answer 90 seconds later it reconnects. A server that accepts the
+  connection but doesn't finish registering within 90 seconds is
+  dropped too.
+- **Fallback servers:** list more servers per network, and when one
+  can't be reached the bot tries the next:
+
+  ```yaml
+  networks:
+    EFnet:
+      server: irc.underworld.no
+      fallback_servers: [irc.swepipe.se, "irc.efnet.nl:6697"]
+  ```
+
+  (`tls_fingerprint` pins a single server's key, so it can't be combined
+  with fallbacks; `tls_self_signed` records each server's key separately.)
+- **Reconnects** back off from 5 seconds to 5 minutes. An unexpected
+  error in the bot's own code is logged with where it happened and the
+  bot reconnects, rather than leaving that network. Only a server on
+  the wrong network (`network:` mismatch) stops a network for good.
+- **Channels:** see above: kicks and failed joins are retried.
+- **Watchdog:** if the bot ever stops making progress for 3 minutes (a
+  deadlock or a handler that hangs), it logs what every thread was doing
+  and exits with an error; Docker (`unless-stopped`) and the systemd unit
+  (`Restart=on-failure`) restart it.
+- **Data file problems** are reported and the bot keeps running on the
+  data it has; plugins that fail to reload keep their previous version.
+
+## Parallel handling
+
+The bot never waits on one slow thing:
+
+- **Commands run in parallel.** Each user's commands go to a worker pool
+  and run in order for that user (IDENTIFY, then OP), while other users'
+  commands and the server's lines (PING, joins, modes) are handled
+  meanwhile.
+- **Password checks run in separate processes** (`hash_workers`, default
+  2). A check costs ~200 ms of CPU and ~64 MB; done in worker processes,
+  several run at once on different cores and the bot carries on. If the
+  workers fail, hashing falls back to the bot's own process. Set
+  `hash_workers: 0` to always hash in-process.
+- **Plugins run in parallel**, each in its own queue (see [Plugins](#plugins)).
+- **Sending is queued.** Lines go out at the flood-control rate (5 at
+  once, then one per second) from a writer thread; urgent ones (PONG,
+  QUIT) jump the queue, and on shutdown the QUIT goes out before the
+  connection closes. If over 300 lines pile up (a runaway plugin), new
+  ones are dropped and that is logged.
 
 ## Commands
 
@@ -93,6 +151,7 @@ All commands are sent by private message (`/msg ModeBot ...`); replies are notic
 | `ACCESS <#chan> LIST` / `ADD <account> <voice\|op>` / `DEL <account>` | op and above |
 | `ACCESS <#chan> ADDMASK <nick!user@host> <voice\|op>` / `DELMASK <mask>` | bot admins |
 | `PLUGIN LIST` / `LOAD <name>` / `UNLOAD <name>` / `RELOAD [name]` | bot admins (see [Plugins](#plugins)) |
+| `PLUGIN SETTINGS <name>` / `SET <name> <setting> <value>` / `UNSET <name> <setting>` | bot admins |
 
 **Masks** give voice/op on join to anyone matching `nick!user@host`,
 without identifying. Nick and user may use `*`/`?`; the host must be an
@@ -110,27 +169,27 @@ the channel.
 
 ## Running in Docker
 
-`bin/ircbot-docker` builds a Debian trixie image (Ruby 3.3, no gems) and
+`bin/rubicon-docker` builds a Debian trixie image (Ruby 3.3, no gems) and
 runs the bot in a hardened container. All settings and state live in one
-host folder, `instance/` by default (`IRCBOT_DIR=/path` to change),
+host folder, `instance/` by default (`RUBICON_DIR=/path` to change),
 mounted at `/bot` and editable on the host:
 
 ```sh
-bin/ircbot-docker init                        # create instance/ (copies existing config/data/secret)
-bin/ircbot-docker edit                        # edit config.yml; checks it and reloads the bot
-bin/ircbot-docker account register <nick>     # password prompt, hidden
-bin/ircbot-docker start                       # --debug, --foreground, --rebuild, ...
-bin/ircbot-docker status                      # container, health, server, nick, channels
-bin/ircbot-docker logs -f
-bin/ircbot-docker reload                      # apply config.yml/data changes live
-bin/ircbot-docker reconnect                   # new IRC connection
-bin/ircbot-docker channel register '#chan' <owner>   # the bot joins right away
-bin/ircbot-docker plugin install contrib/plugins/dice.rb   # loads it right away
-bin/ircbot-docker plugin list                 # loaded plugins, commands, load errors
-bin/ircbot-docker restart                     # checks the config first
-bin/ircbot-docker update                      # git pull main, rebuild on a fresh base image, restart
-bin/ircbot-docker test                        # run the test suite on trixie
-bin/ircbot-docker --help                      # everything else
+bin/rubicon-docker init                        # create instance/ (copies existing config/data/secret)
+bin/rubicon-docker edit                        # edit config.yml; checks it and reloads the bot
+bin/rubicon-docker account register <nick>     # password prompt, hidden
+bin/rubicon-docker start                       # --debug, --foreground, --rebuild, ...
+bin/rubicon-docker status                      # container, health, server, nick, channels
+bin/rubicon-docker logs -f
+bin/rubicon-docker reload                      # apply config.yml/data changes live
+bin/rubicon-docker reconnect                   # new IRC connection
+bin/rubicon-docker channel register '#chan' <owner>   # the bot joins right away
+bin/rubicon-docker plugin install contrib/plugins/dice.rb   # loads it right away
+bin/rubicon-docker plugin list                 # loaded plugins, commands, load errors
+bin/rubicon-docker restart                     # checks the config first
+bin/rubicon-docker update                      # git pull main, rebuild on a fresh base image, restart
+bin/rubicon-docker test                        # run the test suite on trixie
+bin/rubicon-docker --help                      # everything else
 ```
 
 **Live reload** (`reload`, `edit`, `channel register|drop`): the bot
@@ -142,10 +201,10 @@ config is refused and the bot keeps running with the old one (the script
 also checks before sending). `data_file`, `pepper_file` and
 `status_file` need a `restart`. Account changes never need a reload.
 
-**Moving to another server:** `bin/ircbot-docker backup` writes one
+**Moving to another server:** `bin/rubicon-docker backup` writes one
 archive with `config.yml`, `data/`, `secret/` and `plugins/` (keep it private: it
 holds the pepper and password hashes). On the new server, with this repo
-and Docker installed: `bin/ircbot-docker restore FILE && bin/ircbot-docker
+and Docker installed: `bin/rubicon-docker restore FILE && bin/rubicon-docker
 start`. IRCnet admits clients by IP, so check that its server accepts the
 new machine.
 
@@ -180,8 +239,8 @@ When someone posts a link, the bot says what it is:
 
 This is the `links` plugin
 ([contrib/plugins/links.rb](contrib/plugins/links.rb)); install it with
-`bin/ircbot-docker plugin install contrib/plugins/links.rb` (new instances
-from `ircbot-docker init` have it already). It previews YouTube (with
+`bin/rubicon-docker plugin install contrib/plugins/links.rb` (new instances
+from `rubicon-docker init` have it already). It previews YouTube (with
 duration and views given an API key), Vimeo, GitHub, Wikipedia, Spotify,
 SoundCloud, Reddit, web page titles and file types, with settings for
 where and for whom it previews, output formats, per-channel settings and
@@ -196,10 +255,10 @@ Discord bot. Each one is a Ruby file in the instance's `plugins/` folder
 bot stays connected:
 
 ```sh
-bin/ircbot-docker plugin install contrib/plugins/dice.rb   # copy in and load
-bin/ircbot-docker plugin list
-bin/ircbot-docker plugin remove dice                       # delete and unload
-bin/ircbot-docker reload       # after editing a plugin or its settings
+bin/rubicon-docker plugin install contrib/plugins/dice.rb   # copy in and load
+bin/rubicon-docker plugin list
+bin/rubicon-docker plugin remove dice                       # delete and unload
+bin/rubicon-docker reload       # after editing a plugin or its settings
 ```
 
 A reload loads new files, reloads changed files and plugins whose
@@ -207,7 +266,35 @@ settings changed, and unloads removed or disabled ones. If a changed
 plugin fails to load, the previous version keeps running and the error
 shows in `plugin list`. Bot admins can do the same over IRC with
 `PLUGIN LIST`, `PLUGIN LOAD|UNLOAD|RELOAD <name>` and `PLUGIN RELOAD`
-(the whole folder); `UNLOAD` sticks until `LOAD` or a restart.
+(the whole folder).
+
+**Per network, remembered.** Loading, unloading and settings changed
+while the bot runs are kept per network in the data file, across reloads
+and restarts:
+
+```sh
+# over IRC, on the network it should apply to (/msg Linuks ...)
+PLUGIN UNLOAD ops                      # stays unloaded here until PLUGIN LOAD ops
+PLUGIN SET links message_type notice   # saved; the plugin reloads with it
+PLUGIN SET links only_channels [#linux.se, #gunnit]
+PLUGIN SETTINGS links                  # current values; saved ones are marked
+PLUGIN UNSET links message_type        # back to config.yml's value
+
+# from the shell: every network, or one with -n
+bin/rubicon-docker plugin unload ops
+bin/rubicon-docker plugin -n EFnet set links message_type notice
+bin/rubicon-docker plugin -n EFnet settings links
+bin/rubicon-docker plugin load ops
+```
+
+Saved settings override the plugin's section in `config.yml` until
+unset. Values are typed: `true`/`false`, numbers, `"quoted text"`,
+`[a, b]` lists and `{key: value}` mappings; anything else is text. A
+value the plugin rejects isn't saved, and the plugin keeps running with
+its previous settings. Settings whose names contain `key`, `token`,
+`secret` or `password` are hidden in replies and kept out of logs and
+other plugins. `enabled`, `networks` and `network_settings` can only be
+changed in `config.yml`.
 
 **Per-plugin settings** go under `plugins:`, keyed by file name:
 
@@ -230,10 +317,10 @@ Without `prefix`, a plugin's commands only work by private message, like
 the built-in ones; with `private: false` and a prefix, only in channels.
 `HELP` lists plugin commands and how to use them.
 
-**Writing a plugin:** one class per file, inheriting from `IRCBot::Plugin`:
+**Writing a plugin:** one class per file, inheriting from `Rubicon::Plugin`:
 
 ```ruby
-class Dice < IRCBot::Plugin
+class Dice < Rubicon::Plugin
   description "Rolls dice"
   setting "sides", default: 6, type: :integer, min: 2   # overridden by config.yml
 
@@ -272,10 +359,13 @@ The plugin API covers much more than commands:
 The full reference is **[docs/plugins.md](docs/plugins.md)**. Examples in
 [contrib/plugins/](contrib/plugins/): `dice` (commands), `ops` (`!kick`, `!kb`, `!ban`, `!topic` for channel ops),
 `chanlog` (channel logs to files), `relay` (chat between channels on
-different networks) and `links` (link previews).
+different networks), `links` (link previews) and `eventlog` (a
+structured, machine-readable log of everything, with a query API for
+other plugins; see [docs/eventlog.md](docs/eventlog.md)).
 
-Commands, hooks and timers run one at a time with the bot's IRC handling,
-so they must be quick; use `background` for anything that waits. An
+Each plugin runs in its own queue: one thing at a time within a plugin,
+in parallel with other plugins and the bot, so a slow plugin only delays
+itself; use `background` for anything that waits. An
 exception in a plugin is logged and never stops the bot. Plugin commands
 share the bot's command rate limits, and output is checked and cut to
 fit, so a plugin can't inject raw protocol lines by accident. Only the
@@ -322,8 +412,8 @@ files in with private permissions.
   **pepper**, then hashed with **scrypt** (64 MiB, ~150 ms per attempt)
   and a random salt.
 - The pepper lives in `secret/pepper.key` (created on first start, mode
-  0600) or `IRCBOT_PEPPER`, never in the data file. A stolen
-  `data/ircbot.json` alone cannot be cracked offline. **Back the pepper up
+  0600) or `RUBICON_PEPPER`, never in the data file. A stolen
+  `data/rubicon.json` alone cannot be cracked offline. **Back the pepper up
   separately: without it no one can log in.** The bot refuses to start if
   the pepper file is accessible by others or doesn't match the data file.
 - **Brute force:** wrong passwords (`IDENTIFY`, or the old password in
@@ -368,7 +458,7 @@ servers themselves. Treat IRCnet server operators as able to see it.
 
 - A login is bound to nick + user@host and ends on QUIT, so another client
   taking the nick does not inherit it.
-- Data lives in `data/ircbot.json` (written atomically, mode 0600, in a
+- Data lives in `data/rubicon.json` (written atomically, mode 0600, in a
   0700 directory). Rate-limit counters are in memory and reset on restart.
 - Only `#` and `&` channels can be registered; IRCnet `!` channels and
   modeless `+` channels are not supported.

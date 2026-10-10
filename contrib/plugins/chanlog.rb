@@ -12,14 +12,14 @@
 #       keep_days: 30         # delete older logs (default 30)
 require "date"
 
-class Chanlog < IRCBot::Plugin
+class Chanlog < Rubicon::Plugin
   description "Logs channel activity to files"
   setting "only", default: [], type: :list, desc: "channels to log; empty: all"
   setting "keep_days", default: 30, type: :integer, min: 1, max: 3650
 
   def setup
     @where = Hash.new { |hash, key| hash[key] = [] } # nick => channels seen in, for quits
-    prune
+    after(1) { prune } # in the plugin's queue, not while the bot is locked for setup
     every(3600) { prune }
   end
 
@@ -70,15 +70,15 @@ class Chanlog < IRCBot::Plugin
 
   def logged?(channel)
     only = settings["only"]
-    only.empty? || only.any? { |c| IRCBot::Casemap.eq?(c, channel) }
+    only.empty? || only.any? { |c| Rubicon::Casemap.eq?(c, channel) }
   end
 
   # Channel names may contain "/" and other characters unsafe in file names.
   def file_name(channel)
-    IRCBot::Casemap.downcase(channel).gsub(/[^\w#&+.-]/) { |c| format("%%%02X", c.ord) }
+    Rubicon::Casemap.downcase(channel).gsub(/[^\w#&+.-]/) { |c| format("%%%02X", c.ord) }
   end
 
-  def key(nick) = IRCBot::Casemap.downcase(nick)
+  def key(nick) = Rubicon::Casemap.downcase(nick)
 
   def prune
     cutoff = Date.today - settings["keep_days"]

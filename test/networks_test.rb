@@ -41,7 +41,7 @@ class NetworksTest < Minitest::Test
   def write_config(yaml) = File.write(@config_path, yaml, perm: 0o600)
 
   def supervisor(factory: ->(net) { @conns[net["id"]] = FakeConnection.new })
-    @supervisor = IRCBot::Supervisor.new(IRCBot::Config.load(@config_path), config_path: @config_path,
+    @supervisor = Rubicon::Supervisor.new(Rubicon::Config.load(@config_path), config_path: @config_path,
                                                                             store: @store, hasher: TEST_HASHER,
                                                                             connection_factory: factory,
                                                                             logger: Logger.new(nil))
@@ -59,7 +59,7 @@ class NetworksTest < Minitest::Test
   # --- config ------------------------------------------------------------
 
   def test_networks_inherit_top_level_settings
-    config = IRCBot::Config.load(@config_path)
+    config = Rubicon::Config.load(@config_path)
     ircnet, efnet = config["networks"]
 
     assert_equal %w[IRCnet EFnet], config["networks"].map { |net| net["id"] }
@@ -72,10 +72,10 @@ class NetworksTest < Minitest::Test
 
   def test_single_server_config_is_one_network
     write_config("server: irc.example.net\nnetwork: IRCnet\n")
-    assert_equal ["IRCnet"], IRCBot::Config.load(@config_path)["networks"].map { |net| net["id"] }
+    assert_equal ["IRCnet"], Rubicon::Config.load(@config_path)["networks"].map { |net| net["id"] }
 
     write_config("server: irc.example.net\n")
-    assert_equal ["default"], IRCBot::Config.load(@config_path)["networks"].map { |net| net["id"] }
+    assert_equal ["default"], Rubicon::Config.load(@config_path)["networks"].map { |net| net["id"] }
   end
 
   def test_rejects_bad_network_configs
@@ -88,24 +88,24 @@ class NetworksTest < Minitest::Test
       "networks: {}\n" => /mapping of network names/
     }.each do |yaml, error|
       write_config(yaml)
-      assert_raises(IRCBot::ConfigError) { IRCBot::Config.load(@config_path) }.then { |e| assert_match(error, e.message) }
+      assert_raises(Rubicon::ConfigError) { Rubicon::Config.load(@config_path) }.then { |e| assert_match(error, e.message) }
     end
   end
 
   # --- channels ------------------------------------------------------------
 
   def test_channels_are_per_network
-    IRCBot::Accounts.new(@store, TEST_HASHER).register("alice", "password123")
-    ircnet = IRCBot::Channels.new(@store, network: "IRCnet")
-    efnet = IRCBot::Channels.new(@store, network: "EFnet")
+    Rubicon::Accounts.new(@store, TEST_HASHER).register("alice", "password123")
+    ircnet = Rubicon::Channels.new(@store, network: "IRCnet")
+    efnet = Rubicon::Channels.new(@store, network: "EFnet")
     ircnet.register("#same", "alice")
 
     refute efnet.registered?("#same")
     efnet.register("#same", "alice")
     ircnet.drop("#same")
     assert efnet.registered?("#same")
-    assert_equal({ "EFnet" => ["#same"] }, IRCBot::Channels.by_network(@store))
-    assert_equal [%w[EFnet #same]], IRCBot::Channels.owned_anywhere(@store, "alice")
+    assert_equal({ "EFnet" => ["#same"] }, Rubicon::Channels.by_network(@store))
+    assert_equal [%w[EFnet #same]], Rubicon::Channels.owned_anywhere(@store, "alice")
   end
 
   def test_old_channels_move_to_the_first_network
@@ -115,16 +115,16 @@ class NetworksTest < Minitest::Test
     supervisor
 
     refute(@store.read { |data| data.key?("channels") })
-    assert IRCBot::Channels.new(@store, network: "IRCnet").registered?("#old")
-    refute IRCBot::Channels.new(@store, network: "EFnet").registered?("#old")
+    assert Rubicon::Channels.new(@store, network: "IRCnet").registered?("#old")
+    refute Rubicon::Channels.new(@store, network: "EFnet").registered?("#old")
   end
 
   # --- supervisor ------------------------------------------------------------
 
   def test_each_network_joins_its_own_channels
     supervisor
-    IRCBot::Channels.new(@store, network: "EFnet").tap do |efnet|
-      IRCBot::Accounts.new(@store, TEST_HASHER).register("alice", "password123")
+    Rubicon::Channels.new(@store, network: "EFnet").tap do |efnet|
+      Rubicon::Accounts.new(@store, TEST_HASHER).register("alice", "password123")
       efnet.register("#registered", "alice")
     end
     welcome("IRCnet")
@@ -135,8 +135,8 @@ class NetworksTest < Minitest::Test
   end
 
   def test_admin_account_works_on_every_network_and_channels_stay_apart
-    IRCBot::Accounts.new(@store, TEST_HASHER).register("root", "password123")
-    IRCBot::Accounts.new(@store, TEST_HASHER).register("alice", "password123")
+    Rubicon::Accounts.new(@store, TEST_HASHER).register("root", "password123")
+    Rubicon::Accounts.new(@store, TEST_HASHER).register("alice", "password123")
     supervisor
     ircnet = welcome("IRCnet")
     efnet = welcome("EFnet", "OtherBot")
@@ -208,7 +208,7 @@ class NetworksTest < Minitest::Test
     lines = [":server 001 ModeBot :Welcome\r\n", ":server 005 ModeBot NETWORK=Other :are supported\r\n"]
     supervisor(factory: ->(_net) { ScriptedConnection.new(lines) })
 
-    error = assert_raises(IRCBot::ConfigError) { @supervisor.run(handle_signals: false) }
+    error = assert_raises(Rubicon::ConfigError) { @supervisor.run(handle_signals: false) }
     assert_match(/IRCnet: .*Other network, not IRCnet/, error.message)
   end
 

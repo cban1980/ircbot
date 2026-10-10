@@ -7,7 +7,7 @@ class PluginTest < Minitest::Test
   include StoreHelper
 
   ECHO = <<~RUBY.freeze
-    class Echo < IRCBot::Plugin
+    class Echo < Rubicon::Plugin
       description "Repeats text"
       command "ECHO", usage: "ECHO <text>", help: "repeat text" do |ctx, args|
         ctx.usage! if args.empty?
@@ -41,7 +41,7 @@ class PluginTest < Minitest::Test
     @config_path = File.join(@tmpdir, "config.yml")
     File.write(@config_path, config_yaml(plugins), perm: 0o600)
     @conn = FakeConnection.new
-    @bot = IRCBot::Bot.new(IRCBot::Config.load(@config_path), config_path: @config_path, connection: @conn,
+    @bot = Rubicon::Bot.new(Rubicon::Config.load(@config_path), config_path: @config_path, connection: @conn,
                                                                 store: @store, hasher: TEST_HASHER, logger: Logger.new(@log))
     @bot.handle(":server 001 ModeBot :Welcome")
     @bot.handle(":ModeBot!bot@host JOIN #chan")
@@ -61,7 +61,7 @@ class PluginTest < Minitest::Test
   def plugin_instance_loaded?(name) = plugin_status.dig(name, "state") == "loaded"
 
   def identify_admin
-    IRCBot::Accounts.new(@store, TEST_HASHER).register("root", "password123")
+    Rubicon::Accounts.new(@store, TEST_HASHER).register("root", "password123")
     say("root", "IDENTIFY password123")
     @conn.clear
   end
@@ -117,7 +117,7 @@ class PluginTest < Minitest::Test
 
   def test_admin_and_identified_requirements
     write_plugin("secret", <<~RUBY)
-      class Secret < IRCBot::Plugin
+      class Secret < Rubicon::Plugin
         command("SHUTDOWNX", admin: true) { |ctx, _| ctx.reply("ok \#{ctx.account}") }
         command("MINE", identified: true) { |ctx, _| ctx.reply("you are \#{ctx.account}") }
       end
@@ -133,7 +133,7 @@ class PluginTest < Minitest::Test
 
   def test_settings_reach_the_plugin
     write_plugin("greet", <<~RUBY)
-      class Greet < IRCBot::Plugin
+      class Greet < Rubicon::Plugin
         defaults "greeting" => "Hello", "punctuation" => "."
         command("GREET") { |ctx, _| ctx.reply(settings["greeting"] + settings["punctuation"]) }
       end
@@ -164,7 +164,7 @@ class PluginTest < Minitest::Test
   def test_broken_new_version_keeps_the_old_one_running
     write_plugin("echo", ECHO)
     start
-    write_plugin("echo", "class Echo < IRCBot::Plugin\n  def broken(\nend\n")
+    write_plugin("echo", "class Echo < Rubicon::Plugin\n  def broken(\nend\n")
     reconfigure("")
 
     say("alice", "ECHO still here")
@@ -175,7 +175,7 @@ class PluginTest < Minitest::Test
 
   def test_removed_or_disabled_plugin_is_unloaded_with_teardown
     write_plugin("bye", <<~RUBY)
-      class Bye < IRCBot::Plugin
+      class Bye < Rubicon::Plugin
         def teardown = say("#chan", "bye")
       end
     RUBY
@@ -187,7 +187,7 @@ class PluginTest < Minitest::Test
 
   def test_setting_change_reloads_the_plugin
     write_plugin("greet", <<~RUBY)
-      class Greet < IRCBot::Plugin
+      class Greet < Rubicon::Plugin
         defaults "greeting" => "Hello"
         command("GREET") { |ctx, _| ctx.reply(settings["greeting"]) }
       end
@@ -201,7 +201,7 @@ class PluginTest < Minitest::Test
 
   def test_plugin_cannot_take_built_in_or_other_plugins_commands
     write_plugin("echo", ECHO)
-    write_plugin("evil", "class Evil < IRCBot::Plugin\n  command('REGISTER') { |ctx, _| ctx.reply('gotcha') }\nend\n")
+    write_plugin("evil", "class Evil < Rubicon::Plugin\n  command('REGISTER') { |ctx, _| ctx.reply('gotcha') }\nend\n")
     write_plugin("echo2", ECHO.sub("class Echo", "class Echo2"))
     start
 
@@ -223,7 +223,7 @@ class PluginTest < Minitest::Test
 
   def test_errors_in_commands_and_hooks_do_not_affect_the_bot
     write_plugin("boom", <<~RUBY)
-      class Boom < IRCBot::Plugin
+      class Boom < Rubicon::Plugin
         command("BOOM") { |_ctx, _| raise "kaboom" }
         on(:join) { |_event| raise "hook kaboom" }
       end
@@ -242,7 +242,7 @@ class PluginTest < Minitest::Test
 
   def test_output_cannot_inject_protocol_lines
     write_plugin("inject", <<~RUBY)
-      class Inject < IRCBot::Plugin
+      class Inject < Rubicon::Plugin
         command("INJECT") { |ctx, _| ctx.reply("one\\r\\nQUIT :pwned\\0") }
       end
     RUBY
@@ -253,11 +253,11 @@ class PluginTest < Minitest::Test
   end
 
   def test_output_while_disconnected_is_dropped
-    write_plugin("hello", "class Hello < IRCBot::Plugin\n  def setup = @sent = say('#chan', 'hi')\nend\n")
-    @conn = Object.new.tap { |c| c.define_singleton_method(:write) { |_| raise IOError, "not connected" } }
+    write_plugin("hello", "class Hello < Rubicon::Plugin\n  def setup = @sent = say('#chan', 'hi')\nend\n")
+    @conn = Object.new.tap { |c| c.define_singleton_method(:write) { |_line, **| raise IOError, "not connected" } }
     config_path = File.join(@tmpdir, "config.yml")
     File.write(config_path, config_yaml(""), perm: 0o600)
-    bot = IRCBot::Bot.new(IRCBot::Config.load(config_path), connection: @conn, store: @store,
+    bot = Rubicon::Bot.new(Rubicon::Config.load(config_path), connection: @conn, store: @store,
                                                              hasher: TEST_HASHER, logger: Logger.new(@log))
 
     plugin = bot.send(:instance_variable_get, :@plugins).instance_variable_get(:@loaded)["hello"].plugin
@@ -268,7 +268,7 @@ class PluginTest < Minitest::Test
 
   def test_events_reach_hooks_but_password_lines_do_not
     write_plugin("spy", <<~RUBY)
-      class Spy < IRCBot::Plugin
+      class Spy < Rubicon::Plugin
         on(:join) { |e| say("#chan", "join \#{e.nick} \#{e.channel}") }
         on(:message) { |e| say("#chan", "msg \#{e.nick}: \#{e.text}") }
         on(:line) { |e| say("#chan", "line \#{e.message.params.last}") if e.message.command == "PRIVMSG" }
@@ -287,7 +287,7 @@ class PluginTest < Minitest::Test
 
   def test_timers_and_background_jobs_run_and_stop_on_unload
     write_plugin("tick", <<~RUBY)
-      class Tick < IRCBot::Plugin
+      class Tick < Rubicon::Plugin
         command("TICK") do |_ctx, _args|
           after(0.01) { say("#chan", "timer") }
           background { say("#chan", "background") }
@@ -341,7 +341,7 @@ class PluginTest < Minitest::Test
     write_plugin("bad", "class Bad\nend\n")
 
     say("root", "PLUGIN RELOAD")
-    assert_equal ["Plugins reloaded. Loaded: none", "bad: failed to load: bad.rb defines no IRCBot::Plugin subclass at its top level"],
+    assert_equal ["Plugins reloaded. Loaded: none", "bad: failed to load: bad.rb defines no Rubicon::Plugin subclass at its top level"],
                  notices_to("root")
   end
 
@@ -349,7 +349,7 @@ class PluginTest < Minitest::Test
 
   def test_storage_persists_across_reloads
     write_plugin("counter", <<~RUBY)
-      class Counter < IRCBot::Plugin
+      class Counter < Rubicon::Plugin
         command("COUNT") do |ctx, _|
           data.update { |d| d["n"] = d.fetch("n", 0) + 1 }
           ctx.reply(data["n"].to_s)
@@ -381,7 +381,18 @@ class PluginTest < Minitest::Test
       %(plugins:\n  dice:\n    prefix: "go"\n) => /prefix must be/,
       %(plugins:\n  dice:\n    private: maybe\n) => /true or false/ }.each do |yaml, error|
       File.write(path, config_yaml(yaml), perm: 0o600)
-      assert_raises(IRCBot::ConfigError) { IRCBot::Config.load(path) }.then { |e| assert_match(error, e.message) }
+      assert_raises(Rubicon::ConfigError) { Rubicon::Config.load(path) }.then { |e| assert_match(error, e.message) }
     end
+  end
+
+  def test_plugins_written_for_the_old_name_still_load
+    write_plugin("legacy", <<~RUBY)
+      class Legacy < IRCBot::Plugin
+        command("OLDNAME") { |ctx, _args| raise IRCBot::Error, "still \#{IRCBot::Casemap.downcase('WORKS')}" }
+      end
+    RUBY
+    start
+    say("alice", "OLDNAME")
+    assert_equal ["still works"], notices_to("alice")
   end
 end

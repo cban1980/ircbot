@@ -1,6 +1,6 @@
 # Example plugin: dice and coins. Install it while the bot runs:
 #
-#   cp contrib/plugins/dice.rb instance/plugins/ && bin/ircbot-docker reload
+#   cp contrib/plugins/dice.rb instance/plugins/ && bin/rubicon-docker reload
 #
 # By default its commands work by private message (/msg ModeBot ROLL 2d6).
 # To also allow "!roll 2d6" in channels, add to config.yml and reload:
@@ -9,7 +9,7 @@
 #     dice:
 #       prefix: "!"
 #       max_dice: 20      # the plugin's own setting (default 10)
-class Dice < IRCBot::Plugin
+class Dice < Rubicon::Plugin
   description "Rolls dice and flips coins"
   defaults "max_dice" => 10, "max_sides" => 1000
 
@@ -19,7 +19,7 @@ class Dice < IRCBot::Plugin
     count = match[1].empty? ? 1 : match[1].to_i
     sides = match[2].to_i
     unless count.between?(1, settings["max_dice"]) && sides.between?(2, settings["max_sides"])
-      raise IRCBot::Error, "Up to #{settings['max_dice']} dice with 2 to #{settings['max_sides']} sides."
+      raise Rubicon::Error, "Up to #{settings['max_dice']} dice with 2 to #{settings['max_sides']} sides."
     end
 
     rolls = Array.new(count) { rand(1..sides) }

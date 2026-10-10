@@ -11,11 +11,11 @@ class BotTest < Minitest::Test
 
   def build_bot(overrides = {})
     @conn = FakeConnection.new
-    config = IRCBot::Config::DEFAULTS.merge(
+    config = Rubicon::Config::DEFAULTS.merge(
       "server" => "irc.example.net", "nick" => "ModeBot", "admins" => ["root"], "channels" => ["#home"],
       "status_file" => File.join(@tmpdir, "status.json")
     ).merge(overrides)
-    @bot = IRCBot::Bot.new(config, connection: @conn, store: @store, hasher: TEST_HASHER,
+    @bot = Rubicon::Bot.new(config, connection: @conn, store: @store, hasher: TEST_HASHER,
                                    clock: -> { @now }, logger: Logger.new(nil))
     @bot.handle(":server 001 ModeBot :Welcome")
     @bot.handle(":ModeBot!bot@host JOIN #chan")
@@ -45,10 +45,10 @@ class BotTest < Minitest::Test
   end
 
   # root registers #chan with alice as owner; bob has an account.
-  # The admin "root" is created locally (as bin/ircbot-account would),
+  # The admin "root" is created locally (as bin/rubicon-account would),
   # because admin names can't be registered over IRC.
   def create_admin
-    IRCBot::Accounts.new(@store, TEST_HASHER).register("root", "password123")
+    Rubicon::Accounts.new(@store, TEST_HASHER).register("root", "password123")
     say("root", "IDENTIFY password123")
   end
 
@@ -89,7 +89,7 @@ class BotTest < Minitest::Test
     @bot.handle(":server 001 ModeBot :Welcome to the EFNet Internet Relay Chat Network ModeBot")
     @conn.clear
 
-    error = assert_raises(IRCBot::ConfigError) do
+    error = assert_raises(Rubicon::ConfigError) do
       @bot.handle(":server 005 ModeBot NETWORK=EFNet :are supported by this server")
     end
     assert_match(/EFNet network, not IRCnet/, error.message)
@@ -101,7 +101,7 @@ class BotTest < Minitest::Test
     @bot.handle(":server 001 ModeBot :Welcome")
     @bot.handle(":server 005 ModeBot PREFIX=(ov)@+ :are supported by this server")
 
-    assert_raises(IRCBot::ConfigError) { @bot.handle(":server 376 ModeBot :End of MOTD command.") }
+    assert_raises(Rubicon::ConfigError) { @bot.handle(":server 376 ModeBot :End of MOTD command.") }
   end
 
   def test_registers_with_configured_identity
@@ -494,7 +494,7 @@ class BotTest < Minitest::Test
     say("alice", "IDENTIFY password123")
     assert_match(/Too many failed attempts. Try again in 15 minutes/, notices_to("alice").last)
 
-    @now += IRCBot::Bot::LOGIN_WINDOW + 1
+    @now += Rubicon::Bot::LOGIN_WINDOW + 1
     say("alice", "IDENTIFY password123")
     assert_match(/identified as alice/, notices_to("alice").last)
   end

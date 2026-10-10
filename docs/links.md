@@ -19,11 +19,11 @@ so they can be configured in detail, changed or left out.
 ## Installing
 
 ```sh
-bin/ircbot-docker plugin install contrib/plugins/links.rb
+bin/rubicon-docker plugin install contrib/plugins/links.rb
 ```
 
-New instances made with `ircbot-docker init` get it automatically. To
-turn previews off, remove it (`ircbot-docker plugin remove links`) or set
+New instances made with `rubicon-docker init` get it automatically. To
+turn previews off, remove it (`rubicon-docker plugin remove links`) or set
 `enabled: false` under `plugins: links:`.
 
 ## What it previews
@@ -48,7 +48,7 @@ never scraped, and give no preview. Each site can be turned off with
 ## Settings
 
 All optional, under `plugins: links:` in `config.yml`. A wrong value
-stops the plugin from loading, with the reason in `ircbot-docker plugin
+stops the plugin from loading, with the reason in `rubicon-docker plugin
 list`.
 
 ```yaml
@@ -109,7 +109,7 @@ plugins:
 
 | Setting | Meaning |
 | --- | --- |
-| `youtube_api_key` | A YouTube Data API v3 key: adds duration, LIVE and view counts. The `IRCBOT_YOUTUBE_API_KEY` environment variable works too |
+| `youtube_api_key` | A YouTube Data API v3 key: adds duration, LIVE and view counts. The `RUBICON_YOUTUBE_API_KEY` environment variable works too |
 | `github_token` | A GitHub token: raises GitHub's limit of 60 lookups per hour. It is only ever sent to api.github.com |
 
 A key in `config.yml` means the file must be private (`chmod 600`); the

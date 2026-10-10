@@ -6,7 +6,7 @@
 #   [example.com] Example Domain
 #   [cdn.example.com] image/png, 1.2 MB
 #
-# Install:   bin/ircbot-docker plugin install contrib/plugins/links.rb
+# Install:   bin/rubicon-docker plugin install contrib/plugins/links.rb
 # Settings:  under "plugins: links:" in config.yml; all are optional and
 #            listed with their defaults in docs/links.md.
 # Commands:  TITLE <url> previews a link on request; LINKS [count] lists
@@ -22,7 +22,7 @@ require "cgi"
 require "json"
 require "uri"
 
-class Links < IRCBot::Plugin
+class Links < Rubicon::Plugin
   description "Previews links: page titles, YouTube, GitHub, Wikipedia and more"
 
   SITES = %w[youtube vimeo github wikipedia spotify soundcloud reddit].freeze
@@ -96,10 +96,10 @@ class Links < IRCBot::Plugin
 
   def setup
     unknown_sites = settings["sites"] - SITES
-    raise IRCBot::Error, "unknown sites: #{unknown_sites.join(', ')} (known: #{SITES.join(', ')})" if unknown_sites.any?
+    raise Rubicon::Error, "unknown sites: #{unknown_sites.join(', ')} (known: #{SITES.join(', ')})" if unknown_sites.any?
 
     unknown_formats = settings["formats"].keys - FORMATS.keys
-    raise IRCBot::Error, "unknown formats: #{unknown_formats.join(', ')} (known: #{FORMATS.keys.join(', ')})" if unknown_formats.any?
+    raise Rubicon::Error, "unknown formats: #{unknown_formats.join(', ')} (known: #{FORMATS.keys.join(', ')})" if unknown_formats.any?
 
     check_channel_settings!
     @lock = Mutex.new # cache and history; previews finish on worker threads
@@ -129,14 +129,14 @@ class Links < IRCBot::Plugin
       line = preview_line(url, opts)
       line ? ctx.reply(line) : ctx.reply_privately("No preview for #{url}.")
     end
-    raise IRCBot::Error, "Too busy right now; try again in a moment." unless queued
+    raise Rubicon::Error, "Too busy right now; try again in a moment." unless queued
   end
 
   command "LINKS", usage: "LINKS [#chan] [count]", help: "links recently posted in a channel", cooldown: 10 do |ctx, args|
     channel = ctx.channel
-    channel = args.shift if channel.nil? && args.first.to_s.match?(IRCBot::Channels::NAME)
+    channel = args.shift if channel.nil? && args.first.to_s.match?(Rubicon::Channels::NAME)
     ctx.usage! unless channel
-    raise IRCBot::Error, "You're not on #{channel}." unless ctx.channel || user(channel, ctx.nick)
+    raise Rubicon::Error, "You're not on #{channel}." unless ctx.channel || user(channel, ctx.nick)
 
     count = (args.first || 5).to_i.clamp(1, 10)
     entries = @lock.synchronize { (@history[key(channel)] || []).last(count).reverse.map(&:dup) }
@@ -156,7 +156,7 @@ class Links < IRCBot::Plugin
 
   def consider(event, channel)
     opts = options(channel)
-    return if event.nick.nil? || IRCBot::Casemap.eq?(event.nick, bot_nick)
+    return if event.nick.nil? || Rubicon::Casemap.eq?(event.nick, bot_nick)
     return if channel && !channel_wanted?(channel, opts)
     return if ignored_user?(event, opts)
 
@@ -195,19 +195,19 @@ class Links < IRCBot::Plugin
   def options(channel)
     return settings unless channel
 
-    overrides = settings["channel_settings"].find { |name, _| IRCBot::Casemap.eq?(name, channel) }&.last
+    overrides = settings["channel_settings"].find { |name, _| Rubicon::Casemap.eq?(name, channel) }&.last
     overrides ? settings.merge(overrides) : settings
   end
 
   def channel_wanted?(channel, opts)
-    return false if opts["ignore_channels"].any? { |c| IRCBot::Casemap.eq?(c, channel) }
+    return false if opts["ignore_channels"].any? { |c| Rubicon::Casemap.eq?(c, channel) }
 
-    opts["only_channels"].empty? || opts["only_channels"].any? { |c| IRCBot::Casemap.eq?(c, channel) }
+    opts["only_channels"].empty? || opts["only_channels"].any? { |c| Rubicon::Casemap.eq?(c, channel) }
   end
 
   def ignored_user?(event, opts)
-    opts["ignore_nicks"].any? { |nick| IRCBot::Casemap.eq?(nick, event.nick) } ||
-      (event.userhost && opts["ignore_masks"].any? { |mask| IRCBot::Channels.mask_match?(mask, event.prefix) })
+    opts["ignore_nicks"].any? { |nick| Rubicon::Casemap.eq?(nick, event.nick) } ||
+      (event.userhost && opts["ignore_masks"].any? { |mask| Rubicon::Channels.mask_match?(mask, event.prefix) })
   end
 
   def domain_wanted?(url, opts)
@@ -246,13 +246,13 @@ class Links < IRCBot::Plugin
     true
   end
 
-  def limiter(window) = (@limiters[window] ||= IRCBot::RateLimiter.new(window: window, clock: -> { now }))
+  def limiter(window) = (@limiters[window] ||= Rubicon::RateLimiter.new(window: window, clock: -> { now }))
 
   def now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
   def command_word?(text)
     word = text.to_s.strip.split.first.to_s.upcase
-    IRCBot::Bot::COMMANDS.key?(word) || self.class.commands.key?(word)
+    Rubicon::Bot::COMMANDS.key?(word) || self.class.commands.key?(word)
   end
 
   # Drops sentence punctuation after a URL, and a closing parenthesis
@@ -299,7 +299,7 @@ class Links < IRCBot::Plugin
     return nil if info == NO_PREVIEW
 
     info || page_info(uri, opts)
-  rescue IRCBot::Error, URI::Error, JSON::ParserError, ArgumentError => e
+  rescue Rubicon::Error, URI::Error, JSON::ParserError, ArgumentError => e
     log.debug("No preview for #{url}: #{e.message}")
     nil
   end
@@ -373,7 +373,7 @@ class Links < IRCBot::Plugin
     }]
   end
 
-  def youtube_api_key = settings["youtube_api_key"] || ENV.fetch("IRCBOT_YOUTUBE_API_KEY", nil)
+  def youtube_api_key = settings["youtube_api_key"] || ENV["RUBICON_YOUTUBE_API_KEY"] || ENV.fetch("IRCBOT_YOUTUBE_API_KEY", nil)
 
   # --- other sites -------------------------------------------------------------------------
 
@@ -508,7 +508,7 @@ class Links < IRCBot::Plugin
   # characters, one line, at most max characters.
   def clean(text, max)
     clean = text.to_s.encode("UTF-8", invalid: :replace, undef: :replace, replace: "")
-                .gsub(IRCBot::Bot::UNSAFE_CHARS, " ").gsub(/[[:space:]]+/, " ").strip
+                .gsub(Rubicon::Bot::UNSAFE_CHARS, " ").gsub(/[[:space:]]+/, " ").strip
     clean.length > max ? "#{clean[0, max - 1].rstrip}…" : clean
   end
 
@@ -582,7 +582,7 @@ class Links < IRCBot::Plugin
 
   def json_or_nil(url, headers = {})
     http_json(url, headers: headers)
-  rescue IRCBot::Error => e
+  rescue Rubicon::Error => e
     log.debug("#{url}: #{e.message}")
     nil
   end
@@ -591,22 +591,22 @@ class Links < IRCBot::Plugin
 
   def escape(text) = URI.encode_www_form_component(text)
 
-  def key(name) = IRCBot::Casemap.downcase(name)
+  def key(name) = Rubicon::Casemap.downcase(name)
 
   def check_channel_settings!
     settings["channel_settings"].each do |channel, overrides|
-      raise IRCBot::Error, "channel_settings: #{channel.inspect} is not a channel" unless channel.to_s.match?(IRCBot::Channels::NAME)
-      raise IRCBot::Error, "channel_settings: #{channel} must be a mapping" unless overrides.is_a?(Hash)
+      raise Rubicon::Error, "channel_settings: #{channel.inspect} is not a channel" unless channel.to_s.match?(Rubicon::Channels::NAME)
+      raise Rubicon::Error, "channel_settings: #{channel} must be a mapping" unless overrides.is_a?(Hash)
 
       unknown = overrides.keys - self.class.settings_spec.keys
-      raise IRCBot::Error, "channel_settings: #{channel}: unknown setting(s) #{unknown.join(', ')}" if unknown.any?
+      raise Rubicon::Error, "channel_settings: #{channel}: unknown setting(s) #{unknown.join(', ')}" if unknown.any?
 
       global = overrides.keys & GLOBAL_ONLY
-      raise IRCBot::Error, "channel_settings: #{channel}: #{global.join(', ')} can't be set per channel" if global.any?
+      raise Rubicon::Error, "channel_settings: #{channel}: #{global.join(', ')} can't be set per channel" if global.any?
 
       overrides.each do |name, value|
         problem = __send__(:setting_problem, self.class.settings_spec[name], value)
-        raise IRCBot::Error, "channel_settings: #{channel}: #{name} #{problem}" if problem
+        raise Rubicon::Error, "channel_settings: #{channel}: #{name} #{problem}" if problem
       end
     end
   end

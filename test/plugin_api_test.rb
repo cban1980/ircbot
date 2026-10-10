@@ -32,7 +32,7 @@ class PluginApiTest < Minitest::Test
     @config_path = File.join(@tmpdir, "config.yml")
     File.write(@config_path, config_yaml(extra), perm: 0o600)
     @conn = FakeConnection.new
-    @bot = IRCBot::Bot.new(IRCBot::Config.load(@config_path), config_path: @config_path, connection: @conn,
+    @bot = Rubicon::Bot.new(Rubicon::Config.load(@config_path), config_path: @config_path, connection: @conn,
                                                                 store: @store, hasher: TEST_HASHER, logger: Logger.new(@log))
     @bot.handle(":server 001 ModeBot :Welcome")
     @bot.handle(":server 005 ModeBot #{isupport} :are supported")
@@ -47,18 +47,18 @@ class PluginApiTest < Minitest::Test
   def notices_to(nick) = @conn.lines.grep(/\ANOTICE #{nick} :/).map { |l| l.split(" :", 2).last }
 
   def register(name)
-    IRCBot::Accounts.new(@store, TEST_HASHER).register(name, "password123")
+    Rubicon::Accounts.new(@store, TEST_HASHER).register(name, "password123")
     say(name, "IDENTIFY password123")
   end
 
   # A plugin that records the events it gets.
   RECORDER = <<~RUBY.freeze
-    class Recorder < IRCBot::Plugin
+    class Recorder < Rubicon::Plugin
       attr_reader :events
 
       def setup = @events = []
 
-      IRCBot::Plugin::EVENTS.each do |type|
+      Rubicon::Plugin::EVENTS.each do |type|
         on(type) { |event| @events << event unless type == :line || type == :outgoing }
       end
       on(:outgoing) { |event| (@outgoing ||= []) << event.text; say("#chan", "echo") if event.text == "PRIVMSG #chan :ping" }
@@ -69,12 +69,12 @@ class PluginApiTest < Minitest::Test
   RUBY
 
   # A plugin whose methods tests call directly.
-  BARE = "class Bare < IRCBot::Plugin; end\n".freeze
+  BARE = "class Bare < Rubicon::Plugin; end\n".freeze
 
   # --- ISUPPORT and the roster -------------------------------------------------
 
   def test_isupport_parses_modes_by_type
-    isupport = IRCBot::ISupport.new
+    isupport = Rubicon::ISupport.new
     isupport.update(%w[PREFIX=(ohv)@%+ CHANMODES=beI,k,l,imnpst MODES=4 MONITOR NETWORK=Test\\x20Net])
 
     assert_equal({ "o" => "@", "h" => "%", "v" => "+" }, isupport.prefixes)
@@ -155,7 +155,7 @@ class PluginApiTest < Minitest::Test
                   "INVITE carol #chan", "PRIVMSG carol :\x01VERSION\x01", "NOTICE carol :\x01FINGER none\x01",
                   "PRIVMSG #chan :\x01ACTION waves\x01"], @conn.lines
 
-    error = assert_raises(IRCBot::Error) { bare.kickban("#chan", "stranger") }
+    error = assert_raises(Rubicon::Error) { bare.kickban("#chan", "stranger") }
     assert_match(/don't know stranger's host/, error.message)
   end
 
@@ -170,6 +170,38 @@ class PluginApiTest < Minitest::Test
       assert_raises(ArgumentError) { bare.raw("#{command} something") }
     end
     assert_raises(ArgumentError) { bare.raw("PRIVMSG #chan :a\r\nQUIT") }
+  end
+
+  def test_text_from_users_cant_become_ctcp
+    write_plugin("bare", BARE)
+    start
+    bare = plugin("bare")
+
+    bare.say("#chan", "\x01DCC SEND evil 1 2 3\x01")
+    bare.notice("alice", "a\x01VERSION\x01b")
+    bare.action("#chan", "waves \x01 hi")
+    assert_equal ["PRIVMSG #chan :DCC SEND evil 1 2 3", "NOTICE alice :aVERSIONb", "PRIVMSG #chan :\x01ACTION waves   hi\x01"],
+                 @conn.lines
+  end
+
+  def test_raw_cant_bypass_channel_protection
+    write_plugin("bare", BARE)
+    start
+    bare = plugin("bare")
+    @bot.handle(":ModeBot!bot@host JOIN #extra")
+    @conn.clear
+
+    assert_raises(ArgumentError) { bare.raw("JOIN 0") }
+    assert_raises(ArgumentError) { bare.raw("JOIN #a,0") }
+    assert_raises(ArgumentError) { bare.raw("PART #chan :bye") }
+    assert_raises(ArgumentError) { bare.raw("PART #extra,#CHAN") }
+    assert_raises(ArgumentError) { bare.raw(":ModeBot NICK other") }
+    assert_raises(ArgumentError) { bare.raw("@tag=1 QUIT") }
+    assert bare.raw("PART #extra")
+    assert bare.raw("JOIN #new")
+    assert_equal ["PART #extra", "JOIN #new"], @conn.lines
+
+    assert_raises(ArgumentError) { bare.on_network("default").raw("PART #chan") }
   end
 
   def test_plugin_channels_survive_reload_and_leave_with_the_plugin
@@ -258,7 +290,7 @@ class PluginApiTest < Minitest::Test
 
   def test_plugins_answer_ctcp_and_core_answers_can_be_off
     write_plugin("finger", <<~RUBY)
-      class Finger < IRCBot::Plugin
+      class Finger < Rubicon::Plugin
         ctcp_handler("FINGER") { |event| "\#{event.nick} pokes back" }
         ctcp_handler("VERSION") { |_event| "Custom version" }
       end
@@ -274,7 +306,7 @@ class PluginApiTest < Minitest::Test
   # --- command options ---------------------------------------------------------------
 
   COMMANDS = <<~RUBY.freeze
-    class Tools < IRCBot::Plugin
+    class Tools < Rubicon::Plugin
       command "HELLO", aliases: %w[HI HEY] do |ctx, _args|
         ctx.reply("hello \#{ctx.nick}")
       end
@@ -327,7 +359,7 @@ class PluginApiTest < Minitest::Test
   # --- settings ---------------------------------------------------------------------------
 
   TYPED = <<~RUBY.freeze
-    class Typed < IRCBot::Plugin
+    class Typed < Rubicon::Plugin
       setting "count", default: 3, type: :integer, min: 1, max: 10
       setting "mode", default: "fast", values: %w[fast slow]
       setting "home", type: :channel
@@ -353,13 +385,13 @@ class PluginApiTest < Minitest::Test
 
   def test_publish_listen_plugin_lookup_and_shared_state
     write_plugin("sender", <<~RUBY)
-      class Sender < IRCBot::Plugin
+      class Sender < Rubicon::Plugin
         def greeting = "hi from sender"
         command("SEND") { |_ctx, args| publish("news", { "text" => args.join(" ") }) }
       end
     RUBY
     write_plugin("receiver", <<~RUBY)
-      class Receiver < IRCBot::Plugin
+      class Receiver < Rubicon::Plugin
         listen("news") { |payload, info| say("#chan", "\#{info[:plugin]}: \#{payload['text']}") }
         command("ASK") { |ctx, _args| ctx.reply(plugin("sender").greeting) }
       end
@@ -373,7 +405,7 @@ class PluginApiTest < Minitest::Test
 
     plugin("sender").shared["count"] = 1
     plugin("sender").shared.synchronize { |hash| hash["count"] += 1 }
-    assert_equal 2, IRCBot::Plugin::Shared.for("sender")["count"]
+    assert_equal 2, Rubicon::Plugin::Shared.for("sender")["count"]
   end
 
   def test_http_only_in_background_and_bot_config_hides_secrets
@@ -416,7 +448,7 @@ class PluginApiTest < Minitest::Test
   YAML
 
   RELAY = <<~RUBY.freeze
-    class Relay < IRCBot::Plugin
+    class Relay < Rubicon::Plugin
       on(:message) do |event|
         other = (networks - [network]).first
         on_network(other)&.say(other == "One" ? "#a" : "#b", "<\#{event.nick}@\#{network}> \#{event.text}")
@@ -427,7 +459,7 @@ class PluginApiTest < Minitest::Test
   def test_plugin_settings_per_network
     path = File.join(@tmpdir, "networks.yml")
     File.write(path, NETWORKS, perm: 0o600)
-    one, two = IRCBot::Config.load(path)["networks"]
+    one, two = Rubicon::Config.load(path)["networks"]
 
     assert_nil one["plugins"]["relay"]["prefix"]
     assert_equal "!", two["plugins"]["relay"]["prefix"]
@@ -435,7 +467,7 @@ class PluginApiTest < Minitest::Test
     refute two["plugins"]["onlyone"]["enabled"]
 
     File.write(path, NETWORKS.sub("networks: [one]", "networks: [Three]"), perm: 0o600)
-    assert_raises(IRCBot::ConfigError) { IRCBot::Config.load(path) }.then { |e| assert_match(/no network Three/, e.message) }
+    assert_raises(Rubicon::ConfigError) { Rubicon::Config.load(path) }.then { |e| assert_match(/no network Three/, e.message) }
   end
 
   def test_plugins_reach_other_networks
@@ -443,7 +475,7 @@ class PluginApiTest < Minitest::Test
     path = File.join(@tmpdir, "networks.yml")
     File.write(path, "#{NETWORKS}plugins_dir: #{@plugins_dir}\n", perm: 0o600)
     conns = {}
-    supervisor = IRCBot::Supervisor.new(IRCBot::Config.load(path), store: @store, hasher: TEST_HASHER,
+    supervisor = Rubicon::Supervisor.new(Rubicon::Config.load(path), store: @store, hasher: TEST_HASHER,
                                                                    connection_factory: ->(net) { conns[net["id"]] = FakeConnection.new },
                                                                    logger: Logger.new(@log))
     %w[One Two].each do |id|
@@ -519,7 +551,7 @@ class PluginApiTest < Minitest::Test
             - ["IRCnet/#linux.se", "EFnet/#gunnit"]
     YAML
     conns = {}
-    supervisor = IRCBot::Supervisor.new(IRCBot::Config.load(path), store: @store, hasher: TEST_HASHER,
+    supervisor = Rubicon::Supervisor.new(Rubicon::Config.load(path), store: @store, hasher: TEST_HASHER,
                                                                    connection_factory: ->(net) { conns[net["id"]] = FakeConnection.new },
                                                                    logger: Logger.new(@log))
     { "IRCnet" => "#linux.se", "EFnet" => "#gunnit" }.each do |id, channel|

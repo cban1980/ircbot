@@ -17,6 +17,7 @@ covers installing and configuring plugins, and
 | [chanlog.rb](../contrib/plugins/chanlog.rb) | logging every event and the bot's own lines to files |
 | [relay.rb](../contrib/plugins/relay.rb) | relaying chat between channels on different networks |
 | [links.rb](../contrib/plugins/links.rb) | link previews: background HTTP, caching, per-channel settings, publishing ([its docs](links.md)) |
+| [eventlog.rb](../contrib/plugins/eventlog.rb) | a structured JSON Lines log with a query API for other plugins ([its docs](eventlog.md)) |
 
 ## Contents
 
@@ -46,7 +47,7 @@ covers installing and configuring plugins, and
 `plugins/hello.rb`:
 
 ```ruby
-class Hello < IRCBot::Plugin
+class Hello < Rubicon::Plugin
   description "Greets people"
   setting "greeting", default: "Hello", type: :string
 
@@ -66,7 +67,7 @@ end
 Install it and try it:
 
 ```sh
-bin/ircbot-docker plugin install hello.rb   # or copy it into instance/plugins/ and reload
+bin/rubicon-docker plugin install hello.rb   # or copy it into instance/plugins/ and reload
 /msg ModeBot HELLO
 ```
 
@@ -82,7 +83,7 @@ plugins:
 ## How plugins run
 
 - **One class per file**, at the top level, inheriting from
-  `IRCBot::Plugin`. The file name (lowercase letters, digits, `_`) is the
+  `Rubicon::Plugin`. The file name (lowercase letters, digits, `_`) is the
   plugin's name, used in `config.yml`, `PLUGIN` commands and logs.
 - **Loading** evaluates the file in a fresh module, so a reload replaces
   the old code completely. If a changed file fails to load, the old
@@ -93,17 +94,28 @@ plugins:
   [`primary?`](#the-network-and-the-server) for work that should happen
   once, [`shared`](#plugins-working-together) for state common to all
   instances, and [`on_network`](#other-networks) to act on another network.
-- **One thing at a time.** Commands, event hooks, timers and listeners run
-  one at a time with the rest of that network's IRC handling, with the
-  plugin as `self`. While a hook runs, nothing else on that network
-  happens, so hooks must be quick. Anything that waits (HTTP, files that
-  may be slow, sleeping) belongs in [`background`](#timers-and-background-work).
+- **One thing at a time per plugin, in parallel with everything else.**
+  Commands, event hooks, timers, listeners and CTCP handlers run in the
+  plugin's own queue, with the plugin as `self`: one at a time and in
+  order (events arrive in the order they happened), so a plugin's own
+  state needs no locking. Different plugins, and the bot itself, run in
+  parallel, so a slow plugin only delays itself. Still, while a hook
+  runs, that plugin's next events wait, so anything that waits (HTTP,
+  slow files, sleeping) belongs in [`background`](#timers-and-background-work).
+- **Events arrive slightly after the fact.** A hook runs just after the
+  bot handled the line, so channel state (`users`, `topic` ...) may
+  already include later changes. Use the event's own fields for what
+  happened.
+- **Shared things need care.** `background` jobs run alongside the
+  plugin's queue, and calling another plugin's methods directly
+  (`plugin(name)`) runs them in your thread, outside its queue; protect
+  state those touch with a `Mutex`, or use `publish`/`listen` instead.
 - **Lifecycle.** `setup` runs after loading, `teardown` before unloading
   (also on reload and shutdown). Timers stop and channels the plugin joined
   are left when it is unloaded.
 - **Failures are contained.** An exception in a hook, timer, listener or
   background job is logged and the bot goes on. In a command, an
-  `IRCBot::Error` sends its message to the user; any other exception is
+  `Rubicon::Error` sends its message to the user; any other exception is
   logged and the user is told the command failed.
 - **Gems** a plugin needs are declared with
   [`requires_gem`](#gems); the bot installs them itself. The standard
@@ -176,7 +188,7 @@ private form, and `channels:` limits the channel form to some channels.
 | `ctx.usage!` | Stops with "Usage: ..." sent to the user |
 
 Stop a command with a message to the user with
-`raise IRCBot::Error, "text"`. Plugin commands share the bot's command
+`raise Rubicon::Error, "text"`. Plugin commands share the bot's command
 rate limits, so a user can't flood through them.
 
 ## Events
@@ -213,10 +225,31 @@ already updated (on `:join` the new user is in `users(channel)`; on
 | `:logout` | A user logged out | `nick userhost account` |
 | `:outgoing` | The bot sent a line | `text` (the line), `message` |
 | `:line` | Any line was received | `message` |
+| `:log` | The bot wrote a log record | `level` (debug/info/warn/error/fatal), `source` (`"IRCnet"`, `"IRCnet/links"` ...), `text` |
 
-Every event also has `type`, `network` and `message` (the parsed line,
-see [types](#reference-types)), plus `event.channel?` and `event.prefix`
+Every event also has `type`, `network`, `at` (when it happened, a UTC
+`Time`; hooks run a moment later) and `message` (the parsed line, see
+[types](#reference-types)), plus `event.channel?` and `event.prefix`
 (`nick!user@host`).
+
+A plugin that only needs some events of a type it hooks can say so with
+`wants_event?(type)`; events it returns false for aren't queued for it at
+all, which matters for busy events like `:line`:
+
+```ruby
+def wants_event?(type) = type != :line || settings["raw"]
+```
+
+If a plugin falls so far behind that its queue (5,000 waiting jobs)
+overflows, new events and commands for it are dropped. When there's room
+again, its `events_dropped(count)` runs first, in order, so it knows
+exactly where it missed something; by default it logs a warning.
+
+`:log` events carry the bot's log as it is written (at the bot's log
+level, already redacted); records about one network go to that
+network's plugins, the rest to the first network's. What a plugin logs
+from a `:log` hook isn't reported again, so it can't loop. The
+[eventlog](eventlog.md) plugin turns all of this into a parseable log.
 
 - Text carrying a password command (`REGISTER`, `IDENTIFY`, `PASSWORD`) is
   never shown to plugins, in any event.
@@ -247,7 +280,7 @@ arguments raise `ArgumentError`.
 | `op / deop / voice / devoice(channel, *nicks)` | Status modes for any number of nicks, batched to the server's `MODES` limit |
 | `ban / unban(channel, *masks)` | Ban list changes, batched the same way |
 | `kick(channel, nick, reason = nil)` | |
-| `kickban(channel, nick, reason = nil)` | Bans `ban_mask(nick)`, then kicks. Raises `IRCBot::Error` if the nick's host is unknown |
+| `kickban(channel, nick, reason = nil)` | Bans `ban_mask(nick)`, then kicks. Raises `Rubicon::Error` if the nick's host is unknown |
 | `ban_mask(nick)` | `"*!*user@host"` for a nick sharing a channel with the bot (a leading `~` is dropped), or nil |
 | `set_topic(channel, text)` | |
 | `invite(nick, channel)` | |
@@ -301,7 +334,7 @@ networks; logins and channel access are per network.
 | `channel_access(channel)` | `[[account, level], ...]`, the owner first |
 | `channel_owner(channel)` | The owner's account, or nil |
 
-Rank levels with `IRCBot::Channels.rank(level)` (voice 1, op 2, owner 3,
+Rank levels with `Rubicon::Channels.rank(level)` (voice 1, op 2, owner 3,
 nil 0).
 
 ## The network and the server
@@ -404,6 +437,15 @@ plugins:
 Don't use the names above for your own settings. To read the bot's
 configuration, use [`bot_config`](#the-network-and-the-server).
 
+Admins can also change settings while the bot runs, per network, with
+`PLUGIN SET <plugin> <setting> <value>` on IRC or `rubicon-docker plugin
+[-n NETWORK] set ...` (see the [README](../README.md#plugins)). Saved
+values override `config.yml`, survive restarts, and reload the plugin.
+They go through the same checks: a value that fails a `setting` check,
+or makes `setup` raise, is refused and the plugin keeps its previous
+settings. So validating settings in `setup` (raise `Rubicon::Error`)
+protects runtime changes too.
+
 ## Storage
 
 | Method | Purpose |
@@ -413,6 +455,8 @@ configuration, use [`bot_config`](#the-network-and-the-server).
 | `data.to_h` | A copy of everything |
 | `data.update { \|hash\| ... }` | Several changes in one atomic write |
 | `data_dir` | A private folder for the plugin's own files (logs, caches): `data/plugins/[<network>/]<name>/` |
+
+`<network>` is the network's name in lower case (`ircnet`, `efnet`).
 
 Reads return copies, so change data through `[]=`/`update`. Writes are
 atomic (a crash never leaves a half-written file) but not free; for data
@@ -429,10 +473,10 @@ in `teardown`.
 | `background { ... }` | Runs on a worker thread; returns false if the queue (50 jobs) is full |
 | `rate_limit(key, limit:, per:)` | Counts one use of `key`; false once it was used `limit` times in `per` seconds |
 
-Timer blocks run like hooks: one at a time with the IRC handling. All
+Timer blocks run like hooks, in the plugin's queue. All
 timers stop when the plugin is unloaded (at most 20 per plugin).
 
-`background` blocks run outside the IRC handling, two at a time, so they
+`background` blocks run outside the plugin's queue, two at a time, so they
 can wait. Everything in the API is safe to call from them; send results
 with `say`/`notice` as usual. Long-lived threads of your own (a server
 socket) should be started in `setup`, only on `primary?` if they must be
@@ -445,13 +489,13 @@ Inside `background` only (they wait for the network):
 | Method | Returns |
 | --- | --- |
 | `http_get(url, accept: "*/*", types: /text|json|xml/)` | `SafeHttp::Response`: `url` (after redirects), `status`, `content_type`, `content_length`, `body` (read only for matching `types`) |
-| `http_json(url)` | Parsed JSON; raises `IRCBot::Error` unless the answer is a 200 with JSON |
+| `http_json(url)` | Parsed JSON; raises `Rubicon::Error` unless the answer is a 200 with JSON |
 
 Requests go through the bot's guarded client: only http
 and https on standard ports, only public IPv4 addresses (no localhost or
 private networks, checked again at every redirect), at most 3 redirects,
 256 KiB and 10 seconds. A refused or failed request raises
-`IRCBot::Error` with the reason.
+`Rubicon::Error` with the reason.
 
 ```ruby
 command "WEATHER", usage: "WEATHER <city>" do |ctx, args|
@@ -459,7 +503,7 @@ command "WEATHER", usage: "WEATHER <city>" do |ctx, args|
   background do
     data = http_json("https://wttr.in/#{URI.encode_www_form_component(ctx.text)}?format=j1")
     ctx.reply("#{ctx.text}: #{data.dig('current_condition', 0, 'temp_C')}°C")
-  rescue IRCBot::Error => e
+  rescue Rubicon::Error => e
     ctx.reply_privately(e.message)
   end
 end
@@ -483,7 +527,7 @@ A plugin can use any gem from rubygems.org. Declare it at the top of the
 class:
 
 ```ruby
-class Feeds < IRCBot::Plugin
+class Feeds < Rubicon::Plugin
   requires_gem "nokogiri", "~> 1.16"            # activated and required here
   requires_gem "feedjira", "~> 3.2", require: false
 
@@ -529,9 +573,9 @@ version of the plugin that is already loaded keeps working until then.
 
 `log` is the plugin's logger (`log.info`, `log.warn`, `log.error`,
 `log.debug`). Its lines are marked with the network and plugin, like
-`[EFnet/chanlog]`, and go to the bot's log (`ircbot-docker logs`).
+`[EFnet/chanlog]`, and go to the bot's log (`rubicon-docker logs`).
 
-- `raise IRCBot::Error, "text"` in a command sends the text to the user.
+- `raise Rubicon::Error, "text"` in a command sends the text to the user.
 - `usage!(text)` raises with "Usage: text"; in commands prefer `ctx.usage!`.
 - Other exceptions in commands, hooks, timers, listeners and background
   jobs are logged with the first line of the backtrace and never stop the
@@ -587,26 +631,26 @@ failures, guarded HTTP); it does not sandbox hostile code.
 
 ## Reference: types
 
-**`IRCBot::Message`**, the parsed line in `event.message`: `tags` (IRCv3
+**`Rubicon::Message`**, the parsed line in `event.message`: `tags` (IRCv3
 tags hash), `prefix` (`nick!user@host` or a server name), `command`
 (upper case, e.g. `"PRIVMSG"`, `"311"`), `params` (list; the last one is
 the trailing text), `nick`, `userhost`.
 
-**`IRCBot::ModeChange`**, in `event.modes`: `set` (true for `+`), `mode`
+**`Rubicon::ModeChange`**, in `event.modes`: `set` (true for `+`), `mode`
 (the letter), `param` (or nil); `to_s` gives `"+o alice"`.
 
-**`IRCBot::Roster::Member`**: `nick`, `userhost` (or nil), `modes` (status
+**`Rubicon::Roster::Member`**: `nick`, `userhost` (or nil), `modes` (status
 letters, e.g. `["o"]`), `op?`, `voice?`, `halfop?`.
 
-**`IRCBot::Roster::Topic`**: `text`, `by` (nick or nick!user@host, or
+**`Rubicon::Roster::Topic`**: `text`, `by` (nick or nick!user@host, or
 nil), `at` (Unix time, or nil).
 
-**`IRCBot::SafeHttp::Response`**: `url`, `status`, `content_type`,
+**`Rubicon::SafeHttp::Response`**: `url`, `status`, `content_type`,
 `content_length`, `body`.
 
-**`IRCBot::Plugin::Event`**: `type network nick userhost channel target
-text new_nick modes ctcp account message`, `channel?`, `prefix`; fields
-an event doesn't use are nil.
+**`Rubicon::Plugin::Event`**: `type network nick userhost channel target
+text new_nick modes ctcp account message at level source`, `channel?`,
+`prefix`; fields an event doesn't use are nil.
 
-**`IRCBot::Plugin::Command`**: `name usage help admin identified aliases
+**`Rubicon::Plugin::Command`**: `name usage help admin identified aliases
 where level cooldown`.

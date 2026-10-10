@@ -15,7 +15,7 @@ class BotRuntimeTest < Minitest::Test
     @config_path = File.join(@tmpdir, "config.yml")
     File.write(@config_path, BASE_CONFIG, perm: 0o600)
     @conn = FakeConnection.new
-    @bot = IRCBot::Bot.new(IRCBot::Config.load(@config_path), config_path: @config_path, connection: @conn,
+    @bot = Rubicon::Bot.new(Rubicon::Config.load(@config_path), config_path: @config_path, connection: @conn,
                                                                 store: @store, hasher: TEST_HASHER, logger: Logger.new(nil))
     @bot.handle(":server 001 ModeBot :Welcome")
     @bot.handle(":ModeBot!bot@host JOIN #home")
@@ -37,8 +37,8 @@ class BotRuntimeTest < Minitest::Test
   end
 
   def test_reload_joins_channels_registered_from_the_command_line
-    IRCBot::Accounts.new(@store, TEST_HASHER).register("alice", "password123")
-    IRCBot::Channels.new(@store).register("#fromcli", "alice")
+    Rubicon::Accounts.new(@store, TEST_HASHER).register("alice", "password123")
+    Rubicon::Channels.new(@store).register("#fromcli", "alice")
 
     @bot.reload_config
     assert_equal ["JOIN #fromcli"], @conn.lines
@@ -76,7 +76,7 @@ class BotRuntimeTest < Minitest::Test
     edit_config("data_file: elsewhere/ircbot.json\n")
 
     assert @bot.reload_config
-    assert_equal File.join(@tmpdir, "data/ircbot.json"), @bot.instance_variable_get(:@config)["data_file"]
+    assert_equal File.join(@tmpdir, "data/rubicon.json"), @bot.instance_variable_get(:@config)["data_file"]
   end
 
   def test_admin_change_applies_without_reconnect

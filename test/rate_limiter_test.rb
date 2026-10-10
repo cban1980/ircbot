@@ -3,7 +3,7 @@ require "test_helper"
 class RateLimiterTest < Minitest::Test
   def setup
     @now = 0
-    @limiter = IRCBot::RateLimiter.new(window: 100, clock: -> { @now })
+    @limiter = Rubicon::RateLimiter.new(window: 100, clock: -> { @now })
   end
 
   def test_blocks_at_limit_until_oldest_hit_expires
