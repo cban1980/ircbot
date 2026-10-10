@@ -14,14 +14,14 @@
 # or follow it live:
 #   listen("log.record") { |record, _info| ... }
 #
-# Install:  bin/rubicon-docker plugin install contrib/plugins/eventlog.rb
+# Install:  bin/gemdrop-docker plugin install contrib/plugins/eventlog.rb
 # Settings: under "plugins: eventlog:" (see docs/eventlog.md); all optional.
 require "date"
 require "json"
 require "time"
 require "zlib"
 
-class Eventlog < Rubicon::Plugin
+class Eventlog < Gemdrop::Plugin
   description "Structured JSON Lines log of IRC events, the bot's messages and its own log"
 
   SCHEMA = 1
@@ -52,7 +52,7 @@ class Eventlog < Rubicon::Plugin
 
   def setup
     unknown = settings["types"] - ALL_TYPES
-    raise Rubicon::Error, "unknown types: #{unknown.join(', ')} (known: #{ALL_TYPES.join(', ')})" if unknown.any?
+    raise Gemdrop::Error, "unknown types: #{unknown.join(', ')} (known: #{ALL_TYPES.join(', ')})" if unknown.any?
 
     @file = nil
     @file_day = nil
@@ -95,7 +95,7 @@ class Eventlog < Rubicon::Plugin
         ctx.reply_privately("#{hit['ts'][0, 16].tr('T', ' ')} #{who} #{hit['text']}")
       end
     end
-    raise Rubicon::Error, "Too busy right now; try again in a moment." unless queued
+    raise Gemdrop::Error, "Too busy right now; try again in a moment." unless queued
   end
 
   # --- reading the log (also for other plugins) -----------------------------------------
@@ -189,7 +189,7 @@ class Eventlog < Rubicon::Plugin
     elsif PRIVATE_TYPES.include?(type) && !settings["private_messages"]
       return nil
     end
-    return nil if event.nick && settings["ignore_nicks"].any? { |n| Rubicon::Casemap.eq?(n, event.nick) }
+    return nil if event.nick && settings["ignore_nicks"].any? { |n| Gemdrop::Casemap.eq?(n, event.nick) }
 
     by = event.message&.nick if type == "kick"
     base.merge(
@@ -295,8 +295,8 @@ class Eventlog < Rubicon::Plugin
 
   def match?(record, types, channel, nick, text)
     return false if types && !types.include?(record["type"])
-    return false if channel && !Rubicon::Casemap.eq?(record["channel"], channel)
-    return false if nick && !Rubicon::Casemap.eq?(record["nick"], nick)
+    return false if channel && !Gemdrop::Casemap.eq?(record["channel"], channel)
+    return false if nick && !Gemdrop::Casemap.eq?(record["nick"], nick)
     return true unless text
 
     body = record["text"].to_s
@@ -306,10 +306,10 @@ class Eventlog < Rubicon::Plugin
   # --- helpers -------------------------------------------------------------------------------
 
   def channel_wanted?(channel)
-    return false if settings["ignore_channels"].any? { |c| Rubicon::Casemap.eq?(c, channel) }
+    return false if settings["ignore_channels"].any? { |c| Gemdrop::Casemap.eq?(c, channel) }
 
     only = settings["only_channels"]
-    only.empty? || only.any? { |c| Rubicon::Casemap.eq?(c, channel) }
+    only.empty? || only.any? { |c| Gemdrop::Casemap.eq?(c, channel) }
   end
 
   def isupport_channel?(target)

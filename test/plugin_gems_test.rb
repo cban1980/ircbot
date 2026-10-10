@@ -42,13 +42,13 @@ class PluginGemsTest < Minitest::Test
   end
 
   def start(installer)
-    Rubicon::PluginGems.for(@gems_dir).installer = installer
+    Gemdrop::PluginGems.for(@gems_dir).installer = installer
     path = File.join(@tmpdir, "config.yml")
-    File.write(path, "server: irc.example.net\nnick: ModeBot\nrequire_secure_users: false\n", perm: 0o600)
+    File.write(path, "server: irc.example.net\nnick: Gemdrop\nrequire_secure_users: false\n", perm: 0o600)
     @conn = FakeConnection.new
-    @bot = Rubicon::Bot.new(Rubicon::Config.load(path), connection: @conn, store: @store, hasher: TEST_HASHER,
+    @bot = Gemdrop::Bot.new(Gemdrop::Config.load(path), connection: @conn, store: @store, hasher: TEST_HASHER,
                                                        logger: Logger.new(nil))
-    @bot.handle(":server 001 ModeBot :Welcome")
+    @bot.handle(":server 001 Gemdrop :Welcome")
   end
 
   def status(name) = @bot.send(:plugin_manager).status[name]
@@ -62,7 +62,7 @@ class PluginGemsTest < Minitest::Test
   def plugin_using(gem_name, requirement)
     mod = gem_name.split("_").map(&:capitalize).join
     <<~RUBY
-      class Fancy < Rubicon::Plugin
+      class Fancy < Gemdrop::Plugin
         requires_gem "#{gem_name}", "#{requirement}"
         command("FANCY") { |ctx, _args| ctx.reply(#{mod}.hello) }
       end
@@ -72,62 +72,62 @@ class PluginGemsTest < Minitest::Test
   def test_reads_requirements_without_running_the_plugin
     source = <<~RUBY
       require "nokogiri"
-      class X < Rubicon::Plugin
+      class X < Gemdrop::Plugin
         requires_gem "nokogiri", "~> 1.16", ">= 1.16.2"
         requires_gem("faraday")
         requires_gem 'mini_mime', require: false
       end
     RUBY
     assert_equal ["nokogiri (~> 1.16, >= 1.16.2)", "faraday", "mini_mime"],
-                 Rubicon::PluginGems.requirements(source).map(&:to_s)
+                 Gemdrop::PluginGems.requirements(source).map(&:to_s)
   end
 
   def test_installs_missing_gems_then_loads_the_plugin
-    write_plugin("fancy", plugin_using("rubicon_fake_one", "~> 1.2"))
+    write_plugin("fancy", plugin_using("gemdrop_fake_one", "~> 1.2"))
     start(fake_installer)
 
     wait_for("fancy", "loaded")
-    assert_equal [["rubicon_fake_one", "~> 1.2"]], @installed
-    assert_equal "rubicon_fake_one 1.2.0\n", File.read(File.join(@tmpdir, "gems.lock"))
+    assert_equal [["gemdrop_fake_one", "~> 1.2"]], @installed
+    assert_equal "gemdrop_fake_one 1.2.0\n", File.read(File.join(@tmpdir, "gems.lock"))
 
-    @bot.handle(":alice!a@a.host PRIVMSG ModeBot :FANCY")
-    assert_includes @conn.lines, "NOTICE alice :hi from rubicon_fake_one"
+    @bot.handle(":alice!a@a.host PRIVMSG Gemdrop :FANCY")
+    assert_includes @conn.lines, "NOTICE alice :hi from gemdrop_fake_one"
   end
 
   def test_installed_gems_load_right_away_and_lock_pins_the_version
-    write_plugin("fancy", plugin_using("rubicon_fake_two", ">= 1.0"))
-    File.write(File.join(@tmpdir, "gems.lock"), "rubicon_fake_two 1.1.0\n")
+    write_plugin("fancy", plugin_using("gemdrop_fake_two", ">= 1.0"))
+    File.write(File.join(@tmpdir, "gems.lock"), "gemdrop_fake_two 1.1.0\n")
     start(fake_installer(version: "1.1.0"))
     wait_for("fancy", "loaded")
-    assert_equal [["rubicon_fake_two", "= 1.1.0"]], @installed, "the locked version is installed"
+    assert_equal [["gemdrop_fake_two", "= 1.1.0"]], @installed, "the locked version is installed"
 
     @installed.clear
     @bot.reload_config
-    File.write(File.join(@plugins_dir, "fancy.rb"), plugin_using("rubicon_fake_two", ">= 1.0") + "# changed\n", perm: 0o600)
+    File.write(File.join(@plugins_dir, "fancy.rb"), plugin_using("gemdrop_fake_two", ">= 1.0") + "# changed\n", perm: 0o600)
     @bot.reload_config
     assert_equal "loaded", status("fancy")["state"]
     assert_empty @installed, "nothing to install the second time"
   end
 
   def test_failed_install_is_reported_and_the_bot_goes_on
-    write_plugin("fancy", plugin_using("rubicon_fake_three", "~> 9.0"))
+    write_plugin("fancy", plugin_using("gemdrop_fake_three", "~> 9.0"))
     start(fake_installer(fail_with: "could not find a valid gem"))
 
     wait_for("fancy", "error")
-    assert_match(/couldn't install its gems: rubicon_fake_three \(~> 9.0\): could not find a valid gem/,
+    assert_match(/couldn't install its gems: gemdrop_fake_three \(~> 9.0\): could not find a valid gem/,
                  status("fancy")["error"])
   end
 
   def test_status_shows_installing_while_waiting
     gate = Queue.new
     slow = fake_installer
-    write_plugin("fancy", plugin_using("rubicon_fake_four", "~> 1.2"))
+    write_plugin("fancy", plugin_using("gemdrop_fake_four", "~> 1.2"))
     start(lambda { |*args|
       gate.pop
       slow.call(*args)
     })
 
-    assert_equal({ "state" => "installing", "gems" => ["rubicon_fake_four (~> 1.2)"] }, status("fancy"))
+    assert_equal({ "state" => "installing", "gems" => ["gemdrop_fake_four (~> 1.2)"] }, status("fancy"))
     gate << :go
     wait_for("fancy", "loaded")
   end

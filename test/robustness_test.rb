@@ -17,16 +17,16 @@ class RobustnessTest < Minitest::Test
 
   def bot(overrides = {}, connection: FakeConnection.new)
     @conn = connection
-    config = Rubicon::Config::DEFAULTS.merge("server" => "irc.example.net", "nick" => "ModeBot",
+    config = Gemdrop::Config::DEFAULTS.merge("server" => "irc.example.net", "nick" => "Gemdrop",
                                             "status_file" => File.join(@tmpdir, "status.json"),
                                             "plugins_dir" => File.join(@tmpdir, "plugins")).merge(overrides)
-    @bot = Rubicon::Bot.new(config, connection: connection, store: @store, hasher: TEST_HASHER, clock: -> { @now },
+    @bot = Gemdrop::Bot.new(config, connection: connection, store: @store, hasher: TEST_HASHER, clock: -> { @now },
                                    logger: Logger.new(@log))
   end
 
   def connected!
     @bot.instance_variable_set(:@link_since, @now)
-    @bot.handle(":server 001 ModeBot :Welcome")
+    @bot.handle(":server 001 Gemdrop :Welcome")
     @conn.clear
   end
 
@@ -53,7 +53,7 @@ class RobustnessTest < Minitest::Test
     tick_at(100)
     assert_empty @conn.lines
     tick_at(121)
-    assert_equal ["PING :rubicon-alive"], @conn.lines
+    assert_equal ["PING :gemdrop-alive"], @conn.lines
     tick_at(150)
     assert_equal 1, @conn.lines.size, "one ping, not one per tick"
     refute @conn.closed
@@ -66,7 +66,7 @@ class RobustnessTest < Minitest::Test
     bot
     connected!
     tick_at(121)
-    @bot.handle(":server PONG server :rubicon-alive")
+    @bot.handle(":server PONG server :gemdrop-alive")
     tick_at(300)
     refute @conn.closed
     tick_at(330)
@@ -88,12 +88,12 @@ class RobustnessTest < Minitest::Test
   def test_fallback_servers_are_validated
     path = File.join(@tmpdir, "c.yml")
     File.write(path, "server: a.example.net\nfallback_servers: [b.example.net, \"c.example.net:6667\"]\n", perm: 0o600)
-    assert_equal %w[b.example.net c.example.net:6667], Rubicon::Config.load(path)["fallback_servers"]
+    assert_equal %w[b.example.net c.example.net:6667], Gemdrop::Config.load(path)["fallback_servers"]
 
     File.write(path, "server: a.example.net\nfallback_servers: [\"bad host\"]\n", perm: 0o600)
-    assert_raises(Rubicon::ConfigError) { Rubicon::Config.load(path) }
+    assert_raises(Gemdrop::ConfigError) { Gemdrop::Config.load(path) }
     File.write(path, "server: a.example.net\nfallback_servers: [b.example.net]\ntls_fingerprint: #{'a' * 64}\n", perm: 0o600)
-    assert_raises(Rubicon::ConfigError) { Rubicon::Config.load(path) }.then { |e| assert_match(/can't be used with fallback/, e.message) }
+    assert_raises(Gemdrop::ConfigError) { Gemdrop::Config.load(path) }.then { |e| assert_match(/can't be used with fallback/, e.message) }
   end
 
   def test_moves_to_the_next_server_when_one_is_down
@@ -101,16 +101,16 @@ class RobustnessTest < Minitest::Test
     down_port = down.addr[1]
     down.close # nothing listens here now
     up = TCPServer.new("127.0.0.1", 0)
-    config = Rubicon::Config::DEFAULTS.merge(
+    config = Gemdrop::Config::DEFAULTS.merge(
       "server" => "127.0.0.1", "port" => down_port, "fallback_servers" => ["127.0.0.1:#{up.addr[1]}"],
-      "tls" => false, "allow_insecure" => true, "nick" => "ModeBot",
+      "tls" => false, "allow_insecure" => true, "nick" => "Gemdrop",
       "status_file" => File.join(@tmpdir, "status.json"), "plugins_dir" => File.join(@tmpdir, "plugins")
     )
-    with_const(Rubicon::Bot, :RECONNECT_MIN, 0.1) do
-      @bot = Rubicon::Bot.new(config, store: @store, hasher: TEST_HASHER, logger: Logger.new(@log))
+    with_const(Gemdrop::Bot, :RECONNECT_MIN, 0.1) do
+      @bot = Gemdrop::Bot.new(config, store: @store, hasher: TEST_HASHER, logger: Logger.new(@log))
       runner = Thread.new { @bot.run(handle_signals: false) }
       client = up.accept
-      assert_match(/\ANICK ModeBot/, client.gets)
+      assert_match(/\ANICK Gemdrop/, client.gets)
       assert_match(/Next attempt goes to 127.0.0.1:#{up.addr[1]}/, @log.string)
       @bot.stop("bye")
       assert runner.join(10)
@@ -138,7 +138,7 @@ class RobustnessTest < Minitest::Test
   end
 
   def test_an_unexpected_error_reconnects_instead_of_stopping
-    with_const(Rubicon::Bot, :RECONNECT_MIN, 0.05) do
+    with_const(Gemdrop::Bot, :RECONNECT_MIN, 0.05) do
       bot({}, connection: FlakyConnection.new)
       runner = Thread.new { @bot.run(handle_signals: false) }
       sleep 0.05 until @conn.connects >= 2 || !runner.alive?
@@ -151,10 +151,10 @@ class RobustnessTest < Minitest::Test
 
   def test_watchdog_acts_when_the_bot_is_stuck
     fired = Queue.new
-    old_action = Rubicon::Bot.watchdog_action
-    Rubicon::Bot.watchdog_action = ->(stuck, _log) { fired << stuck.network_id }
-    with_const(Rubicon::Bot, :WATCHDOG_INTERVAL, 0.02) do
-      with_const(Rubicon::Bot, :WATCHDOG_LIMIT, 0.1) do
+    old_action = Gemdrop::Bot.watchdog_action
+    Gemdrop::Bot.watchdog_action = ->(stuck, _log) { fired << stuck.network_id }
+    with_const(Gemdrop::Bot, :WATCHDOG_INTERVAL, 0.02) do
+      with_const(Gemdrop::Bot, :WATCHDOG_LIMIT, 0.1) do
         bot
         watchdog = @bot.send(:start_watchdog)
         hog = Thread.new { @bot.send(:synchronize) { sleep 0.5 } }
@@ -164,11 +164,11 @@ class RobustnessTest < Minitest::Test
       end
     end
   ensure
-    Rubicon::Bot.watchdog_action = old_action
+    Gemdrop::Bot.watchdog_action = old_action
   end
 
   def test_worker_pool_threads_end_on_shutdown
-    pool = Rubicon::WorkerPool.new(size: 2, max_queue: 5, logger: Logger.new(nil))
+    pool = Gemdrop::WorkerPool.new(size: 2, max_queue: 5, logger: Logger.new(nil))
     done = Queue.new
     pool.submit { done << :ran }
     done.pop
@@ -184,13 +184,13 @@ class RobustnessTest < Minitest::Test
     dir = File.join(@tmpdir, "plugins")
     Dir.mkdir(dir, 0o700)
     File.write(File.join(dir, "counter.rb"), <<~RUBY, perm: 0o600)
-      class Counter < Rubicon::Plugin
+      class Counter < Gemdrop::Plugin
         setting "times", default: 1, type: :integer, max: 3
       end
     RUBY
     path = File.join(@tmpdir, "config.yml")
     File.write(path, "server: irc.example.net\n", perm: 0o600)
-    tool = File.expand_path("../bin/rubicon-account", __dir__)
+    tool = File.expand_path("../bin/gemdrop-account", __dir__)
     out, status = Open3.capture2e("ruby", tool, "-c", path, "plugin-set", "counter", "times", "9")
     refute status.success?
     assert_match(/times must be at most 3/, out)
@@ -202,13 +202,13 @@ class RobustnessTest < Minitest::Test
     dir = File.join(@tmpdir, "plugins")
     Dir.mkdir(dir, 0o700)
     File.write(File.join(dir, "picky.rb"), <<~RUBY, perm: 0o600)
-      class Picky < Rubicon::Plugin
+      class Picky < Gemdrop::Plugin
         def setup
-          raise Rubicon::Error, "mode must be calm" unless settings["mode"] == "calm"
+          raise Gemdrop::Error, "mode must be calm" unless settings["mode"] == "calm"
         end
       end
     RUBY
-    Rubicon::PluginState.new(@store).set("picky", "mode", "wild")
+    Gemdrop::PluginState.new(@store).set("picky", "mode", "wild")
     bot({ "plugins" => { "picky" => { "mode" => "calm" } } })
     error = @bot.send(:plugin_manager).status["picky"]["error"]
     assert_match(/mode must be calm \(it has settings saved with PLUGIN SET: mode; PLUGIN UNSET picky <setting>/, error)
@@ -220,14 +220,14 @@ class RobustnessTest < Minitest::Test
     dir = File.join(@tmpdir, "plugins")
     Dir.mkdir(dir, 0o700)
     path = File.join(@tmpdir, "config.yml")
-    File.write(path, "server: irc.example.net\nnick: ModeBot\n", perm: 0o600)
-    @bot = Rubicon::Bot.new(Rubicon::Config.load(path), config_path: path, connection: FakeConnection.new, store: @store,
+    File.write(path, "server: irc.example.net\nnick: Gemdrop\n", perm: 0o600)
+    @bot = Gemdrop::Bot.new(Gemdrop::Config.load(path), config_path: path, connection: FakeConnection.new, store: @store,
                                                        hasher: TEST_HASHER, logger: Logger.new(@log))
-    @bot.handle(":server 001 ModeBot :Welcome")
+    @bot.handle(":server 001 Gemdrop :Welcome")
     status = -> { JSON.parse(File.read(File.join(@tmpdir, "data/status.json")))["plugins"] }
     assert_empty status.call
 
-    File.write(File.join(dir, "hello.rb"), "class Hello < Rubicon::Plugin; end\n", perm: 0o600)
+    File.write(File.join(dir, "hello.rb"), "class Hello < Gemdrop::Plugin; end\n", perm: 0o600)
     assert @bot.reload_config
     assert_equal "loaded", status.call.dig("hello", "state")
 
@@ -237,10 +237,10 @@ class RobustnessTest < Minitest::Test
   end
 
   def test_a_long_running_plugin_job_is_reported_once
-    executor = Rubicon::KeyedExecutor.new(size: 1, name: "test")
+    executor = Gemdrop::KeyedExecutor.new(size: 1, name: "test")
     gate = Queue.new
     executor.submit("plugin:slowpoke") { gate.pop }
-    with_const(Rubicon::Bot, :BUSY_PLUGIN, 0.05) do
+    with_const(Gemdrop::Bot, :BUSY_PLUGIN, 0.05) do
       bot
       @bot.instance_variable_set(:@plugin_jobs, executor)
       sleep 0.1

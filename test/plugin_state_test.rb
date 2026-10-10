@@ -8,13 +8,13 @@ class PluginStateTest < Minitest::Test
   include StoreHelper
 
   GREETER = <<~RUBY.freeze
-    class Greeter < Rubicon::Plugin
+    class Greeter < Gemdrop::Plugin
       setting "greeting", default: "Hello", type: :string
       setting "times", default: 1, type: :integer, min: 1, max: 3
       setting "rooms", default: [], type: :list
       setting "api_key", type: :string
       def setup
-        raise Rubicon::Error, "greeting can't be BOOM" if settings["greeting"] == "BOOM"
+        raise Gemdrop::Error, "greeting can't be BOOM" if settings["greeting"] == "BOOM"
       end
       command("GREET") { |ctx, _args| ctx.reply(([settings["greeting"]] * settings["times"]).join(" ")) }
     end
@@ -33,7 +33,7 @@ class PluginStateTest < Minitest::Test
   def write_config(plugins)
     File.write(@config_path, <<~YAML + plugins, perm: 0o600)
       server: irc.example.net
-      nick: ModeBot
+      nick: Gemdrop
       admins: [root]
       require_secure_users: false
     YAML
@@ -44,27 +44,27 @@ class PluginStateTest < Minitest::Test
     @conn = FakeConnection.new
     logger = Logger.new(@log)
     logger.level = Logger::DEBUG
-    @bot = Rubicon::Bot.new(Rubicon::Config.load(@config_path), config_path: @config_path, connection: @conn,
+    @bot = Gemdrop::Bot.new(Gemdrop::Config.load(@config_path), config_path: @config_path, connection: @conn,
                                                                 store: @store, hasher: TEST_HASHER, logger: logger)
-    @bot.handle(":server 001 ModeBot :Welcome")
-    Rubicon::Accounts.new(@store, TEST_HASHER).register("root", "password123") unless Rubicon::Accounts.new(@store, TEST_HASHER).exists?("root")
+    @bot.handle(":server 001 Gemdrop :Welcome")
+    Gemdrop::Accounts.new(@store, TEST_HASHER).register("root", "password123") unless Gemdrop::Accounts.new(@store, TEST_HASHER).canonical("root")
     admin("IDENTIFY password123")
     @conn.clear
   end
 
-  def admin(text) = @bot.handle(":root!r@root.host PRIVMSG ModeBot :#{text}")
+  def admin(text) = @bot.handle(":root!r@root.host PRIVMSG Gemdrop :#{text}")
   def replies = @conn.lines.grep(/\ANOTICE root :/).map { |l| l.split(" :", 2).last }
   def plugins = @bot.send(:plugin_manager)
   def loaded?(name = "greeter") = plugins.status.dig(name, "state") == "loaded"
 
   def greet
     @conn.clear
-    @bot.handle(":alice!a@a.host PRIVMSG ModeBot :GREET")
+    @bot.handle(":alice!a@a.host PRIVMSG Gemdrop :GREET")
     @conn.lines.grep(/\ANOTICE alice :/).map { |l| l.split(" :", 2).last }.first
   end
 
   def test_parse_value
-    parse = ->(text) { Rubicon::PluginState.parse_value(text) }
+    parse = ->(text) { Gemdrop::PluginState.parse_value(text) }
     assert_equal [true, false, nil, 5, -2, 1.5], %w[true false null 5 -2 1.5].map(&parse)
     assert_equal ["#linux.se", "#gunnit", 3], parse.call("[#linux.se, #gunnit, 3]")
     assert_equal "two words", parse.call(%("two words"))
@@ -132,7 +132,7 @@ class PluginStateTest < Minitest::Test
     assert_match(/\ANot saved: greeter failed to load: greeting can't be BOOM/, replies.last)
     assert loaded?, "the previous version keeps running"
     assert_equal "Hello", greet
-    assert_empty Rubicon::PluginState.new(@store).settings("greeter")
+    assert_empty Gemdrop::PluginState.new(@store).settings("greeter")
   end
 
   def test_bot_options_can_be_set_too
@@ -145,7 +145,7 @@ class PluginStateTest < Minitest::Test
 
   def test_secret_settings_are_hidden
     File.write(File.join(@plugins_dir, "spy.rb"), <<~RUBY, perm: 0o600)
-      class Spy < Rubicon::Plugin
+      class Spy < Gemdrop::Plugin
         attr_reader :seen
         on(:line) { |e| (@seen ||= []) << e.message.params.last.to_s }
       end
@@ -156,13 +156,13 @@ class PluginStateTest < Minitest::Test
     assert_equal "greeter: api_key = (hidden) saved for default; plugin reloaded.", replies.last
     refute_includes @log.string, "sekrit123"
     refute((plugins.plugin("spy").seen || []).any? { |text| text.include?("sekrit123") })
-    assert_equal "sekrit123", Rubicon::PluginState.new(@store).settings("greeter")["api_key"]
+    assert_equal "sekrit123", Gemdrop::PluginState.new(@store).settings("greeter")["api_key"]
   end
 
   def test_state_is_per_network
     path = File.join(@tmpdir, "networks.yml")
     File.write(path, <<~YAML, perm: 0o600)
-      nick: ModeBot
+      nick: Gemdrop
       admins: [root]
       require_secure_users: false
       plugins_dir: #{@plugins_dir}
@@ -172,18 +172,18 @@ class PluginStateTest < Minitest::Test
         Two:
           server: two.example.net
     YAML
-    Rubicon::Accounts.new(@store, TEST_HASHER).register("root", "password123")
+    Gemdrop::Accounts.new(@store, TEST_HASHER).register("root", "password123")
     supervisor = lambda do
-      Rubicon::Supervisor.new(Rubicon::Config.load(path), store: @store, hasher: TEST_HASHER,
+      Gemdrop::Supervisor.new(Gemdrop::Config.load(path), store: @store, hasher: TEST_HASHER,
                                                         connection_factory: ->(_net) { FakeConnection.new },
                                                         logger: Logger.new(nil))
     end
     sup = supervisor.call
     one = sup.bot("One")
-    one.handle(":server 001 ModeBot :Welcome")
-    one.handle(":root!r@root.host PRIVMSG ModeBot :IDENTIFY password123")
-    one.handle(":root!r@root.host PRIVMSG ModeBot :PLUGIN UNLOAD greeter")
-    Rubicon::PluginState.new(@store, network: "Two").set("greeter", "greeting", "Moi")
+    one.handle(":server 001 Gemdrop :Welcome")
+    one.handle(":root!r@root.host PRIVMSG Gemdrop :IDENTIFY password123")
+    one.handle(":root!r@root.host PRIVMSG Gemdrop :PLUGIN UNLOAD greeter")
+    Gemdrop::PluginState.new(@store, network: "Two").set("greeter", "greeting", "Moi")
 
     sup = supervisor.call # restart
     refute_equal "loaded", sup.bot("One").send(:plugin_manager).status.dig("greeter", "state")
@@ -193,13 +193,13 @@ class PluginStateTest < Minitest::Test
   # The tool opens the data file and pepper named in the config, so the
   # bot here uses the same ones.
   def test_command_line_tool
-    File.write(@config_path, File.read(@config_path) + "data_file: tooldata/rubicon.json\n", perm: 0o600)
-    config = Rubicon::Config.load(@config_path)
+    File.write(@config_path, File.read(@config_path) + "data_file: tooldata/gemdrop.json\n", perm: 0o600)
+    config = Gemdrop::Config.load(@config_path)
     @conn = FakeConnection.new
-    @bot = Rubicon::Bot.new(config, config_path: @config_path, connection: @conn, logger: Logger.new(nil),
-                                   hasher: Rubicon::PasswordHasher.new(pepper: Rubicon::Pepper.load(path: config["pepper_file"]), log_n: 4))
-    @bot.handle(":server 001 ModeBot :Welcome")
-    tool = File.expand_path("../bin/rubicon-account", __dir__)
+    @bot = Gemdrop::Bot.new(config, config_path: @config_path, connection: @conn, logger: Logger.new(nil),
+                                   hasher: Gemdrop::PasswordHasher.new(pepper: Gemdrop::Pepper.load(path: config["pepper_file"]), log_n: 4))
+    @bot.handle(":server 001 Gemdrop :Welcome")
+    tool = File.expand_path("../bin/gemdrop-account", __dir__)
     run = ->(*args) { Open3.capture2e("ruby", tool, "-c", @config_path, *args) }
 
     out, status = run.call("plugin-set", "greeter", "greeting", "From", "the", "shell")

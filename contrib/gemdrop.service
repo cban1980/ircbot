@@ -1,0 +1,72 @@
+# systemd unit with sandboxing. Assumes the bot lives in /opt/gemdrop and
+# runs as a dedicated "gemdrop" user:
+#
+#   sudo useradd --system --home-dir /opt/gemdrop --shell /usr/bin/nologin gemdrop
+#   sudo chown -R gemdrop:gemdrop /opt/gemdrop && sudo chmod 700 /opt/gemdrop
+#   sudo -u gemdrop /opt/gemdrop/bin/gemdrop-account register <admin>   # creates pepper + data
+#   sudo cp contrib/gemdrop.service /etc/systemd/system/ && sudo systemctl enable --now gemdrop
+#
+# Secrets can live in /etc/gemdrop/env (root-owned, mode 600) instead of files:
+#   GEMDROP_PEPPER=<64 hex chars>   GEMDROP_YOUTUBE_API_KEY=<key>
+
+[Unit]
+Description=Gemdrop IRC bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gemdrop
+Group=gemdrop
+WorkingDirectory=/opt/gemdrop
+ExecStart=/usr/bin/ruby /opt/gemdrop/bin/gemdrop /opt/gemdrop/config.yml
+EnvironmentFile=-/etc/gemdrop/env
+Restart=on-failure
+RestartSec=30
+UMask=0077
+
+# Filesystem: everything read-only except the data directory.
+ProtectSystem=strict
+ReadWritePaths=/opt/gemdrop/data
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectProc=invisible
+ProcSubset=pid
+
+# Kernel and system state.
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+
+# Privileges.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=yes
+PrivateUsers=yes
+RemoveIPC=yes
+
+# Syscalls and execution. (MemoryDenyWriteExecute is incompatible with
+# Ruby's YJIT; the bot does not enable YJIT.)
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+
+# Network: IPv4/IPv6 sockets, plus Unix sockets for name resolution.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# Resource limits.
+MemoryMax=256M
+TasksMax=32
+LimitNOFILE=256
+
+[Install]
+WantedBy=multi-user.target

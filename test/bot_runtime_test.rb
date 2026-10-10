@@ -6,7 +6,7 @@ class BotRuntimeTest < Minitest::Test
 
   BASE_CONFIG = <<~YAML.freeze
     server: irc.example.net
-    nick: ModeBot
+    nick: Gemdrop
     channels: ["#home"]
   YAML
 
@@ -15,10 +15,10 @@ class BotRuntimeTest < Minitest::Test
     @config_path = File.join(@tmpdir, "config.yml")
     File.write(@config_path, BASE_CONFIG, perm: 0o600)
     @conn = FakeConnection.new
-    @bot = Rubicon::Bot.new(Rubicon::Config.load(@config_path), config_path: @config_path, connection: @conn,
+    @bot = Gemdrop::Bot.new(Gemdrop::Config.load(@config_path), config_path: @config_path, connection: @conn,
                                                                 store: @store, hasher: TEST_HASHER, logger: Logger.new(nil))
-    @bot.handle(":server 001 ModeBot :Welcome")
-    @bot.handle(":ModeBot!bot@host JOIN #home")
+    @bot.handle(":server 001 Gemdrop :Welcome")
+    @bot.handle(":Gemdrop!bot@host JOIN #home")
     @conn.clear
   end
 
@@ -37,19 +37,19 @@ class BotRuntimeTest < Minitest::Test
   end
 
   def test_reload_joins_channels_registered_from_the_command_line
-    Rubicon::Accounts.new(@store, TEST_HASHER).register("alice", "password123")
-    Rubicon::Channels.new(@store).register("#fromcli", "alice")
+    Gemdrop::Accounts.new(@store, TEST_HASHER).register("alice", "password123")
+    Gemdrop::Channels.new(@store).register("#fromcli", "alice")
 
     @bot.reload_config
     assert_equal ["JOIN #fromcli"], @conn.lines
   end
 
   def test_reload_changes_nick_and_umodes_live
-    File.write(@config_path, BASE_CONFIG.sub("nick: ModeBot", "nick: NewBot") + "umodes: \"+iw\"\n", perm: 0o600)
+    File.write(@config_path, BASE_CONFIG.sub("nick: Gemdrop", "nick: NewBot") + "umodes: \"+iw\"\n", perm: 0o600)
 
     @bot.reload_config
     assert_includes @conn.lines, "NICK NewBot"
-    assert_includes @conn.lines, "MODE ModeBot +iw"
+    assert_includes @conn.lines, "MODE Gemdrop +iw"
     refute @conn.closed
   end
 
@@ -76,7 +76,7 @@ class BotRuntimeTest < Minitest::Test
     edit_config("data_file: elsewhere/ircbot.json\n")
 
     assert @bot.reload_config
-    assert_equal File.join(@tmpdir, "data/rubicon.json"), @bot.instance_variable_get(:@config)["data_file"]
+    assert_equal File.join(@tmpdir, "data/gemdrop.json"), @bot.instance_variable_get(:@config)["data_file"]
   end
 
   def test_admin_change_applies_without_reconnect
@@ -96,11 +96,11 @@ class BotRuntimeTest < Minitest::Test
 
   def test_status_file_tracks_state
     assert_equal "connected", status["state"]
-    assert_equal "ModeBot", status["nick"]
+    assert_equal "Gemdrop", status["nick"]
     assert_equal ["#home"], status["channels"]
     assert_equal 0o600, File.stat(File.join(@tmpdir, "data", "status.json")).mode & 0o777
 
-    @bot.handle(":ModeBot!bot@host PART #home")
+    @bot.handle(":Gemdrop!bot@host PART #home")
     assert_empty status["channels"]
   end
 end

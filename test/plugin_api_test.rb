@@ -21,7 +21,7 @@ class PluginApiTest < Minitest::Test
   def config_yaml(extra = "")
     <<~YAML + extra
       server: irc.example.net
-      nick: ModeBot
+      nick: Gemdrop
       admins: [root]
       channels: ["#chan"]
       require_secure_users: false
@@ -32,33 +32,33 @@ class PluginApiTest < Minitest::Test
     @config_path = File.join(@tmpdir, "config.yml")
     File.write(@config_path, config_yaml(extra), perm: 0o600)
     @conn = FakeConnection.new
-    @bot = Rubicon::Bot.new(Rubicon::Config.load(@config_path), config_path: @config_path, connection: @conn,
+    @bot = Gemdrop::Bot.new(Gemdrop::Config.load(@config_path), config_path: @config_path, connection: @conn,
                                                                 store: @store, hasher: TEST_HASHER, logger: Logger.new(@log))
-    @bot.handle(":server 001 ModeBot :Welcome")
-    @bot.handle(":server 005 ModeBot #{isupport} :are supported")
-    @bot.handle(":ModeBot!bot@host JOIN #chan")
-    @bot.handle(":server 353 ModeBot = #chan :@ModeBot +alice bob")
+    @bot.handle(":server 001 Gemdrop :Welcome")
+    @bot.handle(":server 005 Gemdrop #{isupport} :are supported")
+    @bot.handle(":Gemdrop!bot@host JOIN #chan")
+    @bot.handle(":server 353 Gemdrop = #chan :@Gemdrop +alice bob")
     @conn.clear
   end
 
   def plugin(name) = @bot.send(:plugin_manager).plugin(name)
-  def say(nick, text) = @bot.handle(":#{nick}!#{nick}@#{nick}.host PRIVMSG ModeBot :#{text}")
+  def say(nick, text) = @bot.handle(":#{nick}!#{nick}@#{nick}.host PRIVMSG Gemdrop :#{text}")
   def say_in(channel, nick, text) = @bot.handle(":#{nick}!#{nick}@#{nick}.host PRIVMSG #{channel} :#{text}")
   def notices_to(nick) = @conn.lines.grep(/\ANOTICE #{nick} :/).map { |l| l.split(" :", 2).last }
 
   def register(name)
-    Rubicon::Accounts.new(@store, TEST_HASHER).register(name, "password123")
+    Gemdrop::Accounts.new(@store, TEST_HASHER).register(name, "password123")
     say(name, "IDENTIFY password123")
   end
 
   # A plugin that records the events it gets.
   RECORDER = <<~RUBY.freeze
-    class Recorder < Rubicon::Plugin
+    class Recorder < Gemdrop::Plugin
       attr_reader :events
 
       def setup = @events = []
 
-      Rubicon::Plugin::EVENTS.each do |type|
+      Gemdrop::Plugin::EVENTS.each do |type|
         on(type) { |event| @events << event unless type == :line || type == :outgoing }
       end
       on(:outgoing) { |event| (@outgoing ||= []) << event.text; say("#chan", "echo") if event.text == "PRIVMSG #chan :ping" }
@@ -69,12 +69,12 @@ class PluginApiTest < Minitest::Test
   RUBY
 
   # A plugin whose methods tests call directly.
-  BARE = "class Bare < Rubicon::Plugin; end\n".freeze
+  BARE = "class Bare < Gemdrop::Plugin; end\n".freeze
 
   # --- ISUPPORT and the roster -------------------------------------------------
 
   def test_isupport_parses_modes_by_type
-    isupport = Rubicon::ISupport.new
+    isupport = Gemdrop::ISupport.new
     isupport.update(%w[PREFIX=(ohv)@%+ CHANMODES=beI,k,l,imnpst MODES=4 MONITOR NETWORK=Test\\x20Net])
 
     assert_equal({ "o" => "@", "h" => "%", "v" => "+" }, isupport.prefixes)
@@ -103,22 +103,22 @@ class PluginApiTest < Minitest::Test
     assert_equal "20", bare.channel_modes("#chan")["l"]
     assert_equal "a@alice.example", bare.userhost_of("alice"), "learned from the MODE line"
 
-    @bot.handle(":server 324 ModeBot #chan +ntk secret")
+    @bot.handle(":server 324 Gemdrop #chan +ntk secret")
     assert_equal({ "n" => true, "t" => true, "k" => "secret" }, bare.channel_modes("#chan"))
 
-    @bot.handle(":server 332 ModeBot #chan :Old topic")
-    @bot.handle(":server 333 ModeBot #chan alice 1700000000")
+    @bot.handle(":server 332 Gemdrop #chan :Old topic")
+    @bot.handle(":server 333 Gemdrop #chan alice 1700000000")
     assert_equal ["Old topic", "alice", 1_700_000_000], bare.topic("#chan").to_h.values_at(:text, :by, :at)
     @bot.handle(":bob!b@bob.example TOPIC #chan :New topic")
     assert_equal %w[New\ topic bob], bare.topic("#chan").to_h.values_at(:text, :by)
 
-    assert_equal %w[ModeBot alice bob], bare.users("#chan").map(&:nick).sort
+    assert_equal %w[Gemdrop alice bob], bare.users("#chan").map(&:nick).sort
     assert_equal ["#chan"], bare.channels
   end
 
   def test_join_asks_for_channel_modes
     start
-    @bot.handle(":ModeBot!bot@host JOIN #new")
+    @bot.handle(":Gemdrop!bot@host JOIN #new")
     assert_equal ["MODE #new"], @conn.lines
   end
 
@@ -155,7 +155,7 @@ class PluginApiTest < Minitest::Test
                   "INVITE carol #chan", "PRIVMSG carol :\x01VERSION\x01", "NOTICE carol :\x01FINGER none\x01",
                   "PRIVMSG #chan :\x01ACTION waves\x01"], @conn.lines
 
-    error = assert_raises(Rubicon::Error) { bare.kickban("#chan", "stranger") }
+    error = assert_raises(Gemdrop::Error) { bare.kickban("#chan", "stranger") }
     assert_match(/don't know stranger's host/, error.message)
   end
 
@@ -188,14 +188,14 @@ class PluginApiTest < Minitest::Test
     write_plugin("bare", BARE)
     start
     bare = plugin("bare")
-    @bot.handle(":ModeBot!bot@host JOIN #extra")
+    @bot.handle(":Gemdrop!bot@host JOIN #extra")
     @conn.clear
 
     assert_raises(ArgumentError) { bare.raw("JOIN 0") }
     assert_raises(ArgumentError) { bare.raw("JOIN #a,0") }
     assert_raises(ArgumentError) { bare.raw("PART #chan :bye") }
     assert_raises(ArgumentError) { bare.raw("PART #extra,#CHAN") }
-    assert_raises(ArgumentError) { bare.raw(":ModeBot NICK other") }
+    assert_raises(ArgumentError) { bare.raw(":Gemdrop NICK other") }
     assert_raises(ArgumentError) { bare.raw("@tag=1 QUIT") }
     assert bare.raw("PART #extra")
     assert bare.raw("JOIN #new")
@@ -211,7 +211,7 @@ class PluginApiTest < Minitest::Test
 
     bare.join("#extra")
     assert_equal ["JOIN #extra"], @conn.lines
-    @bot.handle(":ModeBot!bot@host JOIN #extra")
+    @bot.handle(":Gemdrop!bot@host JOIN #extra")
     @conn.clear
 
     assert @bot.reload_config
@@ -219,9 +219,9 @@ class PluginApiTest < Minitest::Test
     assert_raises(ArgumentError) { bare.part("#chan") }
 
     @bot.send(:reset_state) # a reconnect rejoins it
-    @bot.handle(":server 001 ModeBot :Welcome")
+    @bot.handle(":server 001 Gemdrop :Welcome")
     assert_includes @conn.lines, "JOIN #extra"
-    @bot.handle(":ModeBot!bot@host JOIN #extra")
+    @bot.handle(":Gemdrop!bot@host JOIN #extra")
     @conn.clear
 
     File.delete(File.join(@plugins_dir, "bare.rb"))
@@ -239,12 +239,12 @@ class PluginApiTest < Minitest::Test
 
     @bot.handle(":alice!alice@alice.host MODE #chan +v bob")
     @bot.handle(":alice!alice@alice.host TOPIC #chan :Hi")
-    @bot.handle(":alice!alice@alice.host INVITE ModeBot #elsewhere")
+    @bot.handle(":alice!alice@alice.host INVITE Gemdrop #elsewhere")
     @bot.handle(":alice!alice@alice.host NOTICE #chan :heads up")
     @bot.handle(":alice!alice@alice.host PRIVMSG #chan :\x01ACTION waves\x01")
-    @bot.handle(":alice!alice@alice.host PRIVMSG ModeBot :hello bot")
-    @bot.handle(":alice!alice@alice.host PRIVMSG ModeBot :\x01FINGER\x01")
-    @bot.handle(":alice!alice@alice.host NOTICE ModeBot :\x01VERSION Some client\x01")
+    @bot.handle(":alice!alice@alice.host PRIVMSG Gemdrop :hello bot")
+    @bot.handle(":alice!alice@alice.host PRIVMSG Gemdrop :\x01FINGER\x01")
+    @bot.handle(":alice!alice@alice.host NOTICE Gemdrop :\x01VERSION Some client\x01")
     say("alice", "LOGOUT")
 
     mode = rec.of(:mode).first
@@ -276,7 +276,9 @@ class PluginApiTest < Minitest::Test
 
   # --- CTCP ------------------------------------------------------------------------
 
+  # The ctcp plugin, set up through an old top-level "ctcp:" section.
   def test_core_ctcp_answers
+    install_plugins(@plugins_dir, "ctcp")
     start(%(ctcp:\n  version: "TestBot 1.0"\n))
 
     say("alice", "\x01VERSION\x01")
@@ -290,7 +292,7 @@ class PluginApiTest < Minitest::Test
 
   def test_plugins_answer_ctcp_and_core_answers_can_be_off
     write_plugin("finger", <<~RUBY)
-      class Finger < Rubicon::Plugin
+      class Finger < Gemdrop::Plugin
         ctcp_handler("FINGER") { |event| "\#{event.nick} pokes back" }
         ctcp_handler("VERSION") { |_event| "Custom version" }
       end
@@ -306,7 +308,7 @@ class PluginApiTest < Minitest::Test
   # --- command options ---------------------------------------------------------------
 
   COMMANDS = <<~RUBY.freeze
-    class Tools < Rubicon::Plugin
+    class Tools < Gemdrop::Plugin
       command "HELLO", aliases: %w[HI HEY] do |ctx, _args|
         ctx.reply("hello \#{ctx.nick}")
       end
@@ -359,7 +361,7 @@ class PluginApiTest < Minitest::Test
   # --- settings ---------------------------------------------------------------------------
 
   TYPED = <<~RUBY.freeze
-    class Typed < Rubicon::Plugin
+    class Typed < Gemdrop::Plugin
       setting "count", default: 3, type: :integer, min: 1, max: 10
       setting "mode", default: "fast", values: %w[fast slow]
       setting "home", type: :channel
@@ -385,13 +387,13 @@ class PluginApiTest < Minitest::Test
 
   def test_publish_listen_plugin_lookup_and_shared_state
     write_plugin("sender", <<~RUBY)
-      class Sender < Rubicon::Plugin
+      class Sender < Gemdrop::Plugin
         def greeting = "hi from sender"
         command("SEND") { |_ctx, args| publish("news", { "text" => args.join(" ") }) }
       end
     RUBY
     write_plugin("receiver", <<~RUBY)
-      class Receiver < Rubicon::Plugin
+      class Receiver < Gemdrop::Plugin
         listen("news") { |payload, info| say("#chan", "\#{info[:plugin]}: \#{payload['text']}") }
         command("ASK") { |ctx, _args| ctx.reply(plugin("sender").greeting) }
       end
@@ -405,7 +407,7 @@ class PluginApiTest < Minitest::Test
 
     plugin("sender").shared["count"] = 1
     plugin("sender").shared.synchronize { |hash| hash["count"] += 1 }
-    assert_equal 2, Rubicon::Plugin::Shared.for("sender")["count"]
+    assert_equal 2, Gemdrop::Plugin::Shared.for("sender")["count"]
   end
 
   def test_http_only_in_background_and_bot_config_hides_secrets
@@ -415,7 +417,7 @@ class PluginApiTest < Minitest::Test
 
     assert_raises(ArgumentError) { bare.http_get("https://example.com/") }
     config = bare.bot_config
-    assert_equal "ModeBot", config["nick"]
+    assert_equal "Gemdrop", config["nick"]
     refute config.key?("data_file")
     assert bare.primary?
     assert_equal ["default"], bare.networks
@@ -428,7 +430,7 @@ class PluginApiTest < Minitest::Test
   # --- several networks -----------------------------------------------------------------
 
   NETWORKS = <<~YAML.freeze
-    nick: ModeBot
+    nick: Gemdrop
     require_secure_users: false
     networks:
       One:
@@ -448,7 +450,7 @@ class PluginApiTest < Minitest::Test
   YAML
 
   RELAY = <<~RUBY.freeze
-    class Relay < Rubicon::Plugin
+    class Relay < Gemdrop::Plugin
       on(:message) do |event|
         other = (networks - [network]).first
         on_network(other)&.say(other == "One" ? "#a" : "#b", "<\#{event.nick}@\#{network}> \#{event.text}")
@@ -459,7 +461,7 @@ class PluginApiTest < Minitest::Test
   def test_plugin_settings_per_network
     path = File.join(@tmpdir, "networks.yml")
     File.write(path, NETWORKS, perm: 0o600)
-    one, two = Rubicon::Config.load(path)["networks"]
+    one, two = Gemdrop::Config.load(path)["networks"]
 
     assert_nil one["plugins"]["relay"]["prefix"]
     assert_equal "!", two["plugins"]["relay"]["prefix"]
@@ -467,7 +469,7 @@ class PluginApiTest < Minitest::Test
     refute two["plugins"]["onlyone"]["enabled"]
 
     File.write(path, NETWORKS.sub("networks: [one]", "networks: [Three]"), perm: 0o600)
-    assert_raises(Rubicon::ConfigError) { Rubicon::Config.load(path) }.then { |e| assert_match(/no network Three/, e.message) }
+    assert_raises(Gemdrop::ConfigError) { Gemdrop::Config.load(path) }.then { |e| assert_match(/no network Three/, e.message) }
   end
 
   def test_plugins_reach_other_networks
@@ -475,12 +477,12 @@ class PluginApiTest < Minitest::Test
     path = File.join(@tmpdir, "networks.yml")
     File.write(path, "#{NETWORKS}plugins_dir: #{@plugins_dir}\n", perm: 0o600)
     conns = {}
-    supervisor = Rubicon::Supervisor.new(Rubicon::Config.load(path), store: @store, hasher: TEST_HASHER,
+    supervisor = Gemdrop::Supervisor.new(Gemdrop::Config.load(path), store: @store, hasher: TEST_HASHER,
                                                                    connection_factory: ->(net) { conns[net["id"]] = FakeConnection.new },
                                                                    logger: Logger.new(@log))
     %w[One Two].each do |id|
-      supervisor.bot(id).handle(":server 001 ModeBot :Welcome")
-      supervisor.bot(id).handle(":ModeBot!b@h JOIN #{id == 'One' ? '#a' : '#b'}")
+      supervisor.bot(id).handle(":server 001 Gemdrop :Welcome")
+      supervisor.bot(id).handle(":Gemdrop!b@h JOIN #{id == 'One' ? '#a' : '#b'}")
     end
 
     supervisor.bot("One").handle(":alice!a@a.host PRIVMSG #a :hello there")
@@ -496,6 +498,7 @@ class PluginApiTest < Minitest::Test
   def example(name) = File.read(File.expand_path("../contrib/plugins/#{name}.rb", __dir__))
 
   def test_ops_example
+    install_plugins(@plugins_dir, "chanserv") # CHANREGISTER, ACCESS
     write_plugin("ops", example("ops"))
     start(%(plugins:\n  ops:\n    prefix: "!"\n))
     register("root")
@@ -528,7 +531,7 @@ class PluginApiTest < Minitest::Test
 
     log = File.read(Dir.glob(File.join(@tmpdir, "data/plugins/chanlog/#chan.*.log")).first)
     lines = log.lines.map { |line| line.split(" ", 2).last.chomp }
-    assert_equal ["--> ModeBot (bot@host) joined", "<alice> hello", "* alice waves", "<ModeBot> hi alice",
+    assert_equal ["--> Gemdrop (bot@host) joined", "<alice> hello", "* alice waves", "<Gemdrop> hi alice",
                   "<-- alice quit (bye)"], lines
   end
 
@@ -536,7 +539,7 @@ class PluginApiTest < Minitest::Test
     write_plugin("relay", example("relay"))
     path = File.join(@tmpdir, "relay.yml")
     File.write(path, <<~YAML, perm: 0o600)
-      nick: ModeBot
+      nick: Gemdrop
       plugins_dir: #{@plugins_dir}
       networks:
         IRCnet:
@@ -551,12 +554,12 @@ class PluginApiTest < Minitest::Test
             - ["IRCnet/#linux.se", "EFnet/#gunnit"]
     YAML
     conns = {}
-    supervisor = Rubicon::Supervisor.new(Rubicon::Config.load(path), store: @store, hasher: TEST_HASHER,
+    supervisor = Gemdrop::Supervisor.new(Gemdrop::Config.load(path), store: @store, hasher: TEST_HASHER,
                                                                    connection_factory: ->(net) { conns[net["id"]] = FakeConnection.new },
                                                                    logger: Logger.new(@log))
     { "IRCnet" => "#linux.se", "EFnet" => "#gunnit" }.each do |id, channel|
-      supervisor.bot(id).handle(":server 001 ModeBot :Welcome")
-      supervisor.bot(id).handle(":ModeBot!b@h JOIN #{channel}")
+      supervisor.bot(id).handle(":server 001 Gemdrop :Welcome")
+      supervisor.bot(id).handle(":Gemdrop!b@h JOIN #{channel}")
     end
 
     supervisor.bot("EFnet").handle(":zphinx!z@z.host PRIVMSG #gunnit :hello from efnet")

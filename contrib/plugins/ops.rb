@@ -8,8 +8,8 @@
 #
 # In a channel: !kick nick [reason], !kb nick [reason], !ban nick|mask,
 # !unban mask, !topic text. By private message, put the channel first:
-# /msg ModeBot KICK #chan nick [reason].
-class Ops < Rubicon::Plugin
+# /msg Gemdrop KICK #chan nick [reason].
+class Ops < Gemdrop::Plugin
   description "Kick, ban and topic commands for channel ops"
   setting "default_reason", default: "Requested", type: :string
 
@@ -33,7 +33,7 @@ class Ops < Rubicon::Plugin
     target = args.first
     unless target.include?("!")
       check!(ctx, target)
-      target = ban_mask(target) or raise Rubicon::Error, "I don't know #{args.first}'s host; give a mask."
+      target = ban_mask(target) or raise Gemdrop::Error, "I don't know #{args.first}'s host; give a mask."
     end
     bot_op!(ctx)
     ban(ctx.target_channel, target)
@@ -54,18 +54,18 @@ class Ops < Rubicon::Plugin
 
   # Nobody can act on the bot, or on users with the same or higher access.
   def check!(ctx, nick)
-    raise Rubicon::Error, "I won't do that to myself." if Rubicon::Casemap.eq?(nick, bot_nick)
-    raise Rubicon::Error, "#{nick} is not on #{ctx.target_channel}." unless user(ctx.target_channel, nick)
+    raise Gemdrop::Error, "I won't do that to myself." if Gemdrop::Casemap.eq?(nick, bot_nick)
+    raise Gemdrop::Error, "#{nick} is not on #{ctx.target_channel}." unless user(ctx.target_channel, nick)
 
     bot_op!(ctx)
     target_level = access_level(ctx.target_channel, account_for(nick))
-    return if Rubicon::Channels.rank(target_level) < Rubicon::Channels.rank(ctx.access_level)
+    return if Gemdrop::Channels.rank(target_level) < Gemdrop::Channels.rank(ctx.access_level)
 
-    raise Rubicon::Error, "#{nick} has equal or higher access on #{ctx.target_channel}."
+    raise Gemdrop::Error, "#{nick} has equal or higher access on #{ctx.target_channel}."
   end
 
   def bot_op!(ctx)
-    raise Rubicon::Error, "I'm not a channel operator on #{ctx.target_channel}." unless op?(ctx.target_channel)
+    raise Gemdrop::Error, "I'm not a channel operator on #{ctx.target_channel}." unless op?(ctx.target_channel)
   end
 
   def reason_text(ctx, words)

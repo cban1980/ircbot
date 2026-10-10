@@ -12,7 +12,7 @@
 #       keep_days: 30         # delete older logs (default 30)
 require "date"
 
-class Chanlog < Rubicon::Plugin
+class Chanlog < Gemdrop::Plugin
   description "Logs channel activity to files"
   setting "only", default: [], type: :list, desc: "channels to log; empty: all"
   setting "keep_days", default: 30, type: :integer, min: 1, max: 3650
@@ -70,15 +70,15 @@ class Chanlog < Rubicon::Plugin
 
   def logged?(channel)
     only = settings["only"]
-    only.empty? || only.any? { |c| Rubicon::Casemap.eq?(c, channel) }
+    only.empty? || only.any? { |c| Gemdrop::Casemap.eq?(c, channel) }
   end
 
   # Channel names may contain "/" and other characters unsafe in file names.
   def file_name(channel)
-    Rubicon::Casemap.downcase(channel).gsub(/[^\w#&+.-]/) { |c| format("%%%02X", c.ord) }
+    Gemdrop::Casemap.downcase(channel).gsub(/[^\w#&+.-]/) { |c| format("%%%02X", c.ord) }
   end
 
-  def key(nick) = Rubicon::Casemap.downcase(nick)
+  def key(nick) = Gemdrop::Casemap.downcase(nick)
 
   def prune
     cutoff = Date.today - settings["keep_days"]

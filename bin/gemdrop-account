@@ -1,0 +1,203 @@
+#!/usr/bin/env ruby
+# Local account and channel management. Works while the bot is running:
+# account changes take effect immediately; after channel changes, reload the
+# bot (SIGHUP, or "gemdrop-docker reload") so it joins or parts. Admin
+# accounts can only be created here.
+#
+# Accounts are shared by all networks; channels belong to one. Channel
+# commands act on the network given with -n (needed when the config has
+# several networks); "channels" without -n lists every network.
+#
+#   bin/gemdrop-account [-c CONFIG] list
+#   bin/gemdrop-account [-c CONFIG] register NAME
+#   bin/gemdrop-account [-c CONFIG] passwd NAME             (ends NAME's sessions)
+#   bin/gemdrop-account [-c CONFIG] delete NAME
+#   bin/gemdrop-account [-c CONFIG] [-n NETWORK] channels
+#   bin/gemdrop-account [-c CONFIG] [-n NETWORK] channel-show CHANNEL
+#   bin/gemdrop-account [-c CONFIG] [-n NETWORK] channel-register CHANNEL OWNER
+#   bin/gemdrop-account [-c CONFIG] [-n NETWORK] channel-drop CHANNEL
+#   bin/gemdrop-account [-c CONFIG] [-n NETWORK] channel-mask-add CHANNEL MASK voice|op
+#   bin/gemdrop-account [-c CONFIG] [-n NETWORK] channel-mask-del CHANNEL MASK
+#   bin/gemdrop-account [-c CONFIG] [-n NETWORK] plugin-load|plugin-unload NAME
+#   bin/gemdrop-account [-c CONFIG] [-n NETWORK] plugin-set NAME SETTING VALUE
+#   bin/gemdrop-account [-c CONFIG] [-n NETWORK] plugin-unset NAME SETTING
+#   bin/gemdrop-account [-c CONFIG] [-n NETWORK] plugin-settings NAME
+#
+# Plugin commands act on every network unless -n picks one, and are
+# remembered across restarts; reload the bot to apply them.
+$LOAD_PATH.unshift File.expand_path("../lib", __dir__)
+require "gemdrop"
+require "io/console"
+require "optparse"
+
+abort "gemdrop-account: refusing to run as root; run it as the bot's user" if Process.euid.zero?
+File.umask(0o077)
+
+# command => number of arguments
+COMMANDS = {
+  "list" => 0, "register" => 1, "passwd" => 1, "delete" => 1,
+  "channels" => 0, "channel-show" => 1, "channel-register" => 2, "channel-drop" => 1,
+  "channel-mask-add" => 3, "channel-mask-del" => 2,
+  "plugin-load" => 1, "plugin-unload" => 1, "plugin-set" => 3, "plugin-unset" => 2, "plugin-settings" => 1
+}.freeze
+# Commands whose last argument may be several words.
+GREEDY = %w[plugin-set].freeze
+
+config_path = File.expand_path("../config.yml", __dir__)
+network_name = nil
+parser = OptionParser.new do |opts|
+  opts.banner = "Usage: #{File.basename($PROGRAM_NAME)} [-c CONFIG] [-n NETWORK] COMMAND [ARGS]\n" \
+                "Commands: list | register NAME | passwd NAME | delete NAME | channels |\n" \
+                "          channel-show CHANNEL | channel-register CHANNEL OWNER | channel-drop CHANNEL |\n" \
+                "          channel-mask-add CHANNEL MASK voice|op | channel-mask-del CHANNEL MASK |\n" \
+                "          plugin-load NAME | plugin-unload NAME | plugin-set NAME SETTING VALUE |\n" \
+                "          plugin-unset NAME SETTING | plugin-settings NAME"
+  opts.on("-c", "--config PATH", "config file (default: config.yml)") { |path| config_path = path }
+  opts.on("-n", "--network NAME", "network for channel commands (default: the only one)") { |name| network_name = name }
+end
+parser.parse!
+command, *args = ARGV
+args = args.first(COMMANDS[command] - 1) + [args.drop(COMMANDS[command] - 1).join(" ")] if GREEDY.include?(command) && args.size > COMMANDS[command]
+abort parser.banner unless COMMANDS.key?(command) && args.size == COMMANDS[command]
+
+def ask_password
+  abort "gemdrop-account: needs an interactive terminal to read the password" unless $stdin.tty?
+
+  first = $stdin.getpass("New password: ")
+  second = $stdin.getpass("Repeat password: ")
+  abort "gemdrop-account: passwords do not match" unless first == second
+  first
+end
+
+begin
+  config = Gemdrop::Config.load(config_path)
+  store = Gemdrop::Store.new(config["data_file"])
+  hasher = Gemdrop::PasswordHasher.new(pepper: Gemdrop::Pepper.load(path: config["pepper_file"]))
+  accounts = Gemdrop::Accounts.new(store, hasher, max_accounts: config["max_accounts"])
+  Gemdrop::Channels.adopt_legacy!(store, config["networks"].first["id"])
+  network_ids = config["networks"].map { |net| net["id"] }
+  network = if network_name
+              network_ids.find { |id| id.casecmp?(network_name) } or
+                abort "gemdrop-account: no network #{network_name} in the config (networks: #{network_ids.join(', ')})"
+            elsif network_ids.size == 1
+              network_ids.first
+            end
+  if command.start_with?("channel-") && network.nil?
+    abort "gemdrop-account: the config has several networks; choose one with -n (#{network_ids.join(', ')})"
+  end
+  channels = Gemdrop::Channels.new(store, network: network || network_ids.first)
+  admin = ->(account) { config["admins"].any? { |a| Gemdrop::Casemap.eq?(a, account) } }
+  existing = ->(name) { accounts.canonical(name) or abort "gemdrop-account: no account named #{name}" }
+
+  case command
+  when "list"
+    accounts.names.sort_by { |n| Gemdrop::Casemap.downcase(n) }.each do |account|
+      owned = Gemdrop::Channels.owned_anywhere(store, account).map { |net, chan| "#{chan} (#{net})" }
+      puts [account, ("(admin)" if admin.call(account)), ("owns #{owned.join(' ')}" if owned.any?)].compact.join("  ")
+    end
+  when "register"
+    name = args[0]
+    abort "gemdrop-account: #{name.inspect} is not a valid IRC nick" unless name.match?(Gemdrop::Config::NICK)
+
+    accounts.register(name, ask_password)
+    puts "Registered #{name}."
+  when "passwd"
+    account = existing.call(args[0])
+    accounts.set_password(account, ask_password)
+    puts "Password changed for #{account}; existing sessions have been ended."
+  when "delete"
+    account = existing.call(args[0])
+    owned = Gemdrop::Channels.owned_anywhere(store, account).map { |net, chan| "#{chan} (#{net})" }
+    abort "gemdrop-account: #{account} owns #{owned.join(', ')}; drop those channels first" if owned.any?
+
+    channels.forget(account)
+    accounts.delete(account)
+    puts "Deleted #{account}."
+  when "channels"
+    (network ? [network] : network_ids).each do |id|
+      list = Gemdrop::Channels.new(store, network: id)
+      names = list.names.sort_by { |c| Gemdrop::Casemap.downcase(c) }
+      puts "#{id}:" if network_ids.size > 1
+      puts "  none" if names.empty? && network_ids.size > 1
+      names.each do |channel|
+        owner, = list.access_list(channel).first
+        puts "#{'  ' if network_ids.size > 1}#{channel}  owner: #{owner}"
+      end
+    end
+  when "channel-show"
+    channel = args[0]
+    abort "gemdrop-account: #{channel} is not registered" unless channels.registered?(channel)
+
+    channels.access_list(channel).each { |account, level| puts "#{account}  #{level}" }
+    channels.masks(channel).each { |mask, level, by| puts "mask #{mask}  #{level}  (added by #{by})" }
+  when "channel-register"
+    channel, owner_name = args
+    owner = existing.call(owner_name)
+    channels.register(channel, owner)
+    puts "Registered #{channel} on #{channels.network} with owner #{owner}. Reload the bot to make it join."
+  when "channel-drop"
+    channel = args[0]
+    abort "gemdrop-account: #{channel} is not registered" unless channels.registered?(channel)
+
+    channels.drop(channel)
+    puts "Dropped #{channel} on #{channels.network}. Reload the bot to make it leave (unless it's in config.yml)."
+  when "channel-mask-add"
+    channel, mask, level = args
+    mask = channels.add_mask(channel, mask, level.downcase, added_by: "command line")
+    puts "Mask #{mask} now gets #{level.downcase} on #{channel} when joining."
+  when "channel-mask-del"
+    channel, mask = args
+    channels.remove_mask(channel, mask)
+    puts "Removed mask #{mask} from #{channel}."
+  when /\Aplugin-/
+    name, key, value = args
+    abort "gemdrop-account: #{name.inspect} is not a valid plugin name" unless name.match?(Gemdrop::PluginManager::NAME)
+    unless File.exist?(File.join(config["plugins_dir"], "#{name}.rb"))
+      abort "gemdrop-account: no plugin file #{name}.rb in #{config['plugins_dir']}"
+    end
+    if key
+      abort "gemdrop-account: #{key.inspect} is not a valid setting name" unless key.match?(Gemdrop::PluginManager::SETTING_NAME)
+      abort "gemdrop-account: #{key} can only be changed in config.yml" if Gemdrop::PluginManager::CONFIG_ONLY.include?(key)
+    end
+    config["networks"].select { |net| network.nil? || net["id"] == network }.each do |net|
+      state = Gemdrop::PluginState.new(store, network: net["id"])
+      case command
+      when "plugin-load"
+        state.set_unloaded(name, false)
+        puts "#{net['id']}: #{name} will load (unless disabled in config.yml)."
+      when "plugin-unload"
+        state.set_unloaded(name, true)
+        puts "#{net['id']}: #{name} is kept unloaded."
+      when "plugin-set"
+        parsed = Gemdrop::PluginState.parse_value(value)
+        Gemdrop::Config.plugins(name => (net["plugins"][name] || {}).merge(state.settings(name)).merge(key => parsed))
+        # The plugin's own rules for the setting (type, allowed values, limits).
+        checked ||= begin
+          klass = Gemdrop::PluginManager.plugin_class(File.join(config["plugins_dir"], "#{name}.rb"))
+          spec = klass.settings_spec[key]
+          problem = spec && klass.allocate.__send__(:setting_problem, spec, parsed)
+          abort "gemdrop-account: #{key} #{problem}" if problem
+          true
+        rescue Gemdrop::Error, StandardError, ScriptError => e
+          warn "gemdrop-account: couldn't check #{key} against the plugin's own rules (#{e.message.lines.first.strip})"
+          true
+        end
+        state.set(name, key, parsed)
+        puts "#{net['id']}: #{name} #{key} = #{Gemdrop::PluginState.show(key, parsed)}"
+      when "plugin-unset"
+        puts state.unset(name, key) ? "#{net['id']}: #{name} #{key} is no longer saved." : "#{net['id']}: #{name} has no saved #{key}."
+      when "plugin-settings"
+        saved = state.settings(name)
+        options = (net["plugins"][name] || {}).except("networks", "network_settings")
+        puts "#{net['id']}:#{' (kept unloaded)' if state.unloaded?(name)}"
+        options.merge(saved).sort.each do |k, v|
+          puts "  #{k} = #{Gemdrop::PluginState.show(k, v)}#{'  (saved)' if saved.key?(k)}"
+        end
+        puts "  (the plugin's own defaults apply to settings not listed)"
+      end
+    end
+    puts "This applies when the bot reloads or starts." unless command == "plugin-settings"
+  end
+rescue Gemdrop::ConfigError, Gemdrop::Error => e
+  abort "gemdrop-account: #{e.message}"
+end

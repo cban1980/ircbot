@@ -1,15 +1,16 @@
-# Rubicon
+# Gemdrop
 
-Rubicon (formerly "ircbot") is a Ruby IRC bot for IRCnet that handles user registration and channel
-access (op/voice). It uses only the Ruby standard library; minitest and
-rake are needed for tests.
+Gemdrop is a Ruby IRC bot for one or more networks at once: bot accounts,
+channel services (access lists, op/voice) and a plugin system that hot-loads
+plugins, and the gems they need, without a restart. The core uses only the
+Ruby standard library; minitest and rake are needed for tests.
 
 ## Running
 
 ```sh
 cp config.example.yml config.yml   # set server, nick, admins, channels
-bin/rubicon                         # or: bin/rubicon path/to/config.yml
-RUBICON_LOG_LEVEL=debug bin/rubicon  # log raw traffic (passwords are redacted)
+bin/gemdrop                         # or: bin/gemdrop path/to/config.yml
+GEMDROP_LOG_LEVEL=debug bin/gemdrop  # log raw traffic (passwords are redacted)
 ```
 
 The bot's identity is set in `config.yml`: `nick` plus fallback
@@ -41,7 +42,7 @@ level, where identity and TLS settings (`nick`, `user`, `tls_min_version`,
 ...) also act as defaults for every network:
 
 ```yaml
-nick: ModeBot
+nick: Gemdrop
 admins: [zphinx]
 networks:
   IRCnet:
@@ -52,38 +53,38 @@ networks:
     server: irc.underworld.no  # one fixed server, not a round-robin name
     network: EFnet
     tls_self_signed: true      # EFnet servers use self-signed certificates
-    nick: ModeBot2             # override any identity or TLS setting
+    nick: Gemdrop2             # override any identity or TLS setting
     channels: ["#gunnit"]
 ```
 
 Per network: `server`, `network`, `port`, the `tls_*` settings,
 `allow_insecure`, `require_secure_users`, `nick`, `alt_nicks`, `user`,
 `realname`, `umodes` and `channels`. The rest, including `admins`,
-`ctcp` and `plugins`, applies to every network.
+and `plugins`, applies to every network.
 
 - **Accounts are shared.** An account (and admin status) works on every
   network, but users IDENTIFY on each network separately.
 - **Channels belong to one network.** `#foo` on IRCnet and `#foo` on EFnet
   are registered, owned and managed separately, on the network you send
-  the command on. Locally: `rubicon-account -n EFnet channel-register ...`
-  (or `rubicon-docker channel -n EFnet register ...`).
+  the command on. Locally: `gemdrop-account -n EFnet channel-register ...`
+  (or `gemdrop-docker channel -n EFnet register ...`).
 - **Plugins** run separately on each network, with their data in
   `data/plugins/<network>/` (lower case, e.g. `data/plugins/ircnet/`). `PLUGIN` commands act on the network they are
   sent on, and what they change (unloads, saved settings) is remembered
   for that network across restarts; a config reload acts on all.
-- A config reload (`rubicon-docker reload`) connects to added networks and
+- A config reload (`gemdrop-docker reload`) connects to added networks and
   leaves removed ones. A network that fails for good (e.g. a server on the
   wrong network) stops on its own; the others keep running.
-- Logs are prefixed with the network, and `rubicon-docker status` shows
+- Logs are prefixed with the network, and `gemdrop-docker status` shows
   each one. The health check is only healthy when every network is
   connected.
 - Without `networks:`, the config is one network as before. Channels
   registered before networks existed move to the first network on the
   first start; older versions of the bot can't read the data file after
-  that, so back it up first (`rubicon-docker backup`).
+  that, so back it up first (`gemdrop-docker backup`).
 
 **First start:** the names in `admins` are bot accounts. Connect with that
-nick over TLS and `/msg ModeBot REGISTER <password>` straight away so
+nick over TLS and `/msg Gemdrop REGISTER <password>` straight away so
 nobody else claims it.
 
 ## Staying up
@@ -139,27 +140,55 @@ The bot never waits on one slow thing:
 
 ## Commands
 
-All commands are sent by private message (`/msg ModeBot ...`); replies are notices.
+All commands are sent by private message (`/msg Gemdrop ...`); replies are notices.
+
+Help comes from the `help` plugin ([contrib/plugins/help.rb](contrib/plugins/help.rb),
+installed by `gemdrop-docker init`) and is layered, so no answer floods
+your query window:
+
+| You send | You get |
+| --- | --- |
+| `HELP` | how help works, and the help topics (2 lines) |
+| `LIST` | the command groups, on one line |
+| `LIST <group>` | that group's commands, on one line |
+| `HELP <command>` | what it does, who may use it and where; then details |
+| `HELP <topic>`, `HELP plugin <name>` | a help page; a plugin's commands and pages |
+| `MORE` | the rest of an answer longer than 3 lines (`lines_per_answer`) |
+
+It covers the core and every loaded plugin automatically; plugins add
+their own text and pages (see [Help](docs/plugins.md#help)).
 
 | Command | Who |
 | --- | --- |
 | `REGISTER <password>` | anyone on TLS; registers the current nick |
 | `IDENTIFY [account] <password>`, `PASSWORD <old> <new>` | anyone on TLS |
 | `LOGOUT`, `WHOAMI` | anyone |
+| `PLUGIN LIST` / `LOAD <name>` / `UNLOAD <name>` / `RELOAD [name]` | bot admins (see [Plugins](#plugins)) |
+| `PLUGIN SETTINGS <name>` / `SET <name> <setting> <value>` / `UNSET <name> <setting>` | bot admins |
+
+### Channel services
+
+Registered channels, access lists and automatic op/voice come from the
+`chanserv` plugin ([contrib/plugins/chanserv.rb](contrib/plugins/chanserv.rb),
+installed by `gemdrop-docker init`). The data belongs to the bot: unloading
+the plugin removes the commands and the automatic modes, but registered
+channels stay registered and joined, and `gemdrop-docker channel` and
+`account` still manage them.
+
+| Command | Who |
+| --- | --- |
 | `CHANREGISTER <#chan> <owner>` | bot admins |
 | `CHANDROP <#chan>` | channel owner |
 | `ACCESS <#chan> LIST` / `ADD <account> <voice\|op>` / `DEL <account>` | op and above |
 | `ACCESS <#chan> ADDMASK <nick!user@host> <voice\|op>` / `DELMASK <mask>` | bot admins |
-| `PLUGIN LIST` / `LOAD <name>` / `UNLOAD <name>` / `RELOAD [name]` | bot admins (see [Plugins](#plugins)) |
-| `PLUGIN SETTINGS <name>` / `SET <name> <setting> <value>` / `UNSET <name> <setting>` | bot admins |
+| `UP <#chan>` / `DOWN <#chan>` | voice and above |
+| `OP`, `DEOP`, `VOICE`, `DEVOICE <#chan> [nick]` | op and above |
 
 **Masks** give voice/op on join to anyone matching `nick!user@host`,
 without identifying. Nick and user may use `*`/`?`; the host must be an
 exact hostname or IP (e.g. `*!*zphinx@home.archflux.net`), so a mask can't
 cover a whole network. Anyone else connecting from that host and matching
 the mask gets the mode too.
-| `UP <#chan>` / `DOWN <#chan>` | voice and above |
-| `OP`, `DEOP`, `VOICE`, `DEVOICE <#chan> [nick]` | op and above |
 
 Levels rank `voice < op < owner`. Users can only grant levels below their
 own and cannot change or deop users of equal or higher rank. Bot admins
@@ -169,27 +198,27 @@ the channel.
 
 ## Running in Docker
 
-`bin/rubicon-docker` builds a Debian trixie image (Ruby 3.3, no gems) and
+`bin/gemdrop-docker` builds a Debian trixie image (Ruby 3.3, no gems) and
 runs the bot in a hardened container. All settings and state live in one
-host folder, `instance/` by default (`RUBICON_DIR=/path` to change),
+host folder, `instance/` by default (`GEMDROP_DIR=/path` to change),
 mounted at `/bot` and editable on the host:
 
 ```sh
-bin/rubicon-docker init                        # create instance/ (copies existing config/data/secret)
-bin/rubicon-docker edit                        # edit config.yml; checks it and reloads the bot
-bin/rubicon-docker account register <nick>     # password prompt, hidden
-bin/rubicon-docker start                       # --debug, --foreground, --rebuild, ...
-bin/rubicon-docker status                      # container, health, server, nick, channels
-bin/rubicon-docker logs -f
-bin/rubicon-docker reload                      # apply config.yml/data changes live
-bin/rubicon-docker reconnect                   # new IRC connection
-bin/rubicon-docker channel register '#chan' <owner>   # the bot joins right away
-bin/rubicon-docker plugin install contrib/plugins/dice.rb   # loads it right away
-bin/rubicon-docker plugin list                 # loaded plugins, commands, load errors
-bin/rubicon-docker restart                     # checks the config first
-bin/rubicon-docker update                      # git pull main, rebuild on a fresh base image, restart
-bin/rubicon-docker test                        # run the test suite on trixie
-bin/rubicon-docker --help                      # everything else
+bin/gemdrop-docker init                        # create instance/ (copies existing config/data/secret)
+bin/gemdrop-docker edit                        # edit config.yml; checks it and reloads the bot
+bin/gemdrop-docker account register <nick>     # password prompt, hidden
+bin/gemdrop-docker start                       # --debug, --foreground, --rebuild, ...
+bin/gemdrop-docker status                      # container, health, server, nick, channels
+bin/gemdrop-docker logs -f
+bin/gemdrop-docker reload                      # apply config.yml/data changes live
+bin/gemdrop-docker reconnect                   # new IRC connection
+bin/gemdrop-docker channel register '#chan' <owner>   # the bot joins right away
+bin/gemdrop-docker plugin install contrib/plugins/dice.rb   # loads it right away
+bin/gemdrop-docker plugin list                 # loaded plugins, commands, load errors
+bin/gemdrop-docker restart                     # checks the config first
+bin/gemdrop-docker update                      # git pull main, rebuild on a fresh base image, restart
+bin/gemdrop-docker test                        # run the test suite on trixie
+bin/gemdrop-docker --help                      # everything else
 ```
 
 **Live reload** (`reload`, `edit`, `channel register|drop`): the bot
@@ -201,10 +230,10 @@ config is refused and the bot keeps running with the old one (the script
 also checks before sending). `data_file`, `pepper_file` and
 `status_file` need a `restart`. Account changes never need a reload.
 
-**Moving to another server:** `bin/rubicon-docker backup` writes one
+**Moving to another server:** `bin/gemdrop-docker backup` writes one
 archive with `config.yml`, `data/`, `secret/` and `plugins/` (keep it private: it
 holds the pepper and password hashes). On the new server, with this repo
-and Docker installed: `bin/rubicon-docker restore FILE && bin/rubicon-docker
+and Docker installed: `bin/gemdrop-docker restore FILE && bin/gemdrop-docker
 start`. IRCnet admits clients by IP, so check that its server accepts the
 new machine.
 
@@ -216,15 +245,19 @@ secrets are excluded from the image (`.dockerignore`).
 
 ## CTCP
 
-The bot answers CTCP `VERSION`, `PING`, `TIME` and `CLIENTINFO`
-(rate-limited like commands). Plugins can answer other CTCP commands or
-replace these answers.
+The `ctcp` plugin ([contrib/plugins/ctcp.rb](contrib/plugins/ctcp.rb),
+installed by `gemdrop-docker init`) answers CTCP `VERSION`, `PING`, `TIME`
+and `CLIENTINFO` (rate-limited like commands). Without it the bot answers
+no CTCP at all. Other plugins can answer other CTCP commands.
 
 ```yaml
-ctcp:
-  enabled: true                       # false: no built-in answers
-  version: "Linuks, a Ruby IRC bot"   # the VERSION answer
+plugins:
+  ctcp:
+    version: "Linuks, a Ruby IRC bot"   # the VERSION answer
+    answer: [VERSION, CLIENTINFO]       # which to answer (default: all four)
 ```
+
+An old top-level `ctcp:` section is still read and becomes these settings.
 
 ## Link previews
 
@@ -239,8 +272,8 @@ When someone posts a link, the bot says what it is:
 
 This is the `links` plugin
 ([contrib/plugins/links.rb](contrib/plugins/links.rb)); install it with
-`bin/rubicon-docker plugin install contrib/plugins/links.rb` (new instances
-from `rubicon-docker init` have it already). It previews YouTube (with
+`bin/gemdrop-docker plugin install contrib/plugins/links.rb` (new instances
+from `gemdrop-docker init` have it already). It previews YouTube (with
 duration and views given an API key), Vimeo, GitHub, Wikipedia, Spotify,
 SoundCloud, Reddit, web page titles and file types, with settings for
 where and for whom it previews, output formats, per-channel settings and
@@ -255,10 +288,10 @@ Discord bot. Each one is a Ruby file in the instance's `plugins/` folder
 bot stays connected:
 
 ```sh
-bin/rubicon-docker plugin install contrib/plugins/dice.rb   # copy in and load
-bin/rubicon-docker plugin list
-bin/rubicon-docker plugin remove dice                       # delete and unload
-bin/rubicon-docker reload       # after editing a plugin or its settings
+bin/gemdrop-docker plugin install contrib/plugins/dice.rb   # copy in and load
+bin/gemdrop-docker plugin list
+bin/gemdrop-docker plugin remove dice                       # delete and unload
+bin/gemdrop-docker reload       # after editing a plugin or its settings
 ```
 
 A reload loads new files, reloads changed files and plugins whose
@@ -281,10 +314,10 @@ PLUGIN SETTINGS links                  # current values; saved ones are marked
 PLUGIN UNSET links message_type        # back to config.yml's value
 
 # from the shell: every network, or one with -n
-bin/rubicon-docker plugin unload ops
-bin/rubicon-docker plugin -n EFnet set links message_type notice
-bin/rubicon-docker plugin -n EFnet settings links
-bin/rubicon-docker plugin load ops
+bin/gemdrop-docker plugin unload ops
+bin/gemdrop-docker plugin -n EFnet set links message_type notice
+bin/gemdrop-docker plugin -n EFnet settings links
+bin/gemdrop-docker plugin load ops
 ```
 
 Saved settings override the plugin's section in `config.yml` until
@@ -317,10 +350,10 @@ Without `prefix`, a plugin's commands only work by private message, like
 the built-in ones; with `private: false` and a prefix, only in channels.
 `HELP` lists plugin commands and how to use them.
 
-**Writing a plugin:** one class per file, inheriting from `Rubicon::Plugin`:
+**Writing a plugin:** one class per file, inheriting from `Gemdrop::Plugin`:
 
 ```ruby
-class Dice < Rubicon::Plugin
+class Dice < Gemdrop::Plugin
   description "Rolls dice"
   setting "sides", default: 6, type: :integer, min: 2   # overridden by config.yml
 
@@ -359,7 +392,7 @@ The plugin API covers much more than commands:
 The full reference is **[docs/plugins.md](docs/plugins.md)**. Examples in
 [contrib/plugins/](contrib/plugins/): `dice` (commands), `ops` (`!kick`, `!kb`, `!ban`, `!topic` for channel ops),
 `chanlog` (channel logs to files), `relay` (chat between channels on
-different networks), `links` (link previews) and `eventlog` (a
+different networks), `links` (link previews), `help`, `chanserv`, `ctcp` and `eventlog` (a
 structured, machine-readable log of everything, with a query API for
 other plugins; see [docs/eventlog.md](docs/eventlog.md)).
 
@@ -412,8 +445,8 @@ files in with private permissions.
   **pepper**, then hashed with **scrypt** (64 MiB, ~150 ms per attempt)
   and a random salt.
 - The pepper lives in `secret/pepper.key` (created on first start, mode
-  0600) or `RUBICON_PEPPER`, never in the data file. A stolen
-  `data/rubicon.json` alone cannot be cracked offline. **Back the pepper up
+  0600) or `GEMDROP_PEPPER`, never in the data file. A stolen
+  `data/gemdrop.json` alone cannot be cracked offline. **Back the pepper up
   separately: without it no one can log in.** The bot refuses to start if
   the pepper file is accessible by others or doesn't match the data file.
 - **Brute force:** wrong passwords (`IDENTIFY`, or the old password in
@@ -458,7 +491,7 @@ servers themselves. Treat IRCnet server operators as able to see it.
 
 - A login is bound to nick + user@host and ends on QUIT, so another client
   taking the nick does not inherit it.
-- Data lives in `data/rubicon.json` (written atomically, mode 0600, in a
+- Data lives in `data/gemdrop.json` (written atomically, mode 0600, in a
   0700 directory). Rate-limit counters are in memory and reset on restart.
 - Only `#` and `&` channels can be registered; IRCnet `!` channels and
   modeless `+` channels are not supported.

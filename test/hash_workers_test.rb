@@ -4,22 +4,22 @@ require "stringio"
 # Password hashing in worker processes.
 class HashWorkersTest < Minitest::Test
   def setup
-    @workers = Rubicon::HashWorkers.new(size: 2)
-    @hasher = Rubicon::PasswordHasher.new(pepper: TEST_PEPPER, workers: @workers, log_n: 12)
+    @workers = Gemdrop::HashWorkers.new(size: 2)
+    @hasher = Gemdrop::PasswordHasher.new(pepper: TEST_PEPPER, workers: @workers, log_n: 12)
   end
 
   def teardown = @workers.shutdown
 
   def test_same_results_as_hashing_in_process
     stored = @hasher.hash("password123")
-    assert Rubicon::PasswordHasher.new(pepper: TEST_PEPPER, log_n: 12).verify("password123", stored)
+    assert Gemdrop::PasswordHasher.new(pepper: TEST_PEPPER, log_n: 12).verify("password123", stored)
     assert @hasher.verify("password123", stored)
     refute @hasher.verify("wrong-password", stored)
   end
 
   def test_other_threads_keep_running_while_hashing
-    stored = Rubicon::PasswordHasher.new(pepper: TEST_PEPPER, log_n: 14).hash("password123")
-    slow = Rubicon::PasswordHasher.new(pepper: TEST_PEPPER, workers: @workers, log_n: 14)
+    stored = Gemdrop::PasswordHasher.new(pepper: TEST_PEPPER, log_n: 14).hash("password123")
+    slow = Gemdrop::PasswordHasher.new(pepper: TEST_PEPPER, workers: @workers, log_n: 14)
     ticks = 0
     stop = false
     ticker = Thread.new do
@@ -50,9 +50,9 @@ class HashWorkersTest < Minitest::Test
 
   def test_falls_back_to_hashing_in_process
     broken = Object.new
-    def broken.scrypt(*, **) = raise(Rubicon::HashWorkers::Failure, "no workers")
+    def broken.scrypt(*, **) = raise(Gemdrop::HashWorkers::Failure, "no workers")
     log = StringIO.new
-    hasher = Rubicon::PasswordHasher.new(pepper: TEST_PEPPER, workers: broken, logger: Logger.new(log), log_n: 4)
+    hasher = Gemdrop::PasswordHasher.new(pepper: TEST_PEPPER, workers: broken, logger: Logger.new(log), log_n: 4)
     assert hasher.verify("password123", hasher.hash("password123"))
     assert_match(/hashing in the bot's process instead/, log.string)
   end

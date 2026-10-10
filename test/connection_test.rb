@@ -7,7 +7,7 @@ class ConnectionTest < Minitest::Test
     @cert = self_signed_cert(@key, "localhost")
     @tcp = TCPServer.new("127.0.0.1", 0)
     @port = @tcp.addr[1]
-    @dir = Dir.mktmpdir("rubicon-tls")
+    @dir = Dir.mktmpdir("gemdrop-tls")
     @known_path = File.join(@dir, "known_servers")
   end
 
@@ -52,14 +52,14 @@ class ConnectionTest < Minitest::Test
   end
 
   def tofu_connection
-    connection(known_servers: Rubicon::KnownServers.new(@known_path))
+    connection(known_servers: Gemdrop::KnownServers.new(@known_path))
   end
 
   def connection(**options)
-    Rubicon::Connection.new(host: "localhost", port: @port, **options)
+    Gemdrop::Connection.new(host: "localhost", port: @port, **options)
   end
 
-  def pin = Rubicon::Connection.spki_fingerprint(@cert)
+  def pin = Gemdrop::Connection.spki_fingerprint(@cert)
 
   def test_rejects_self_signed_certificate_by_default
     start_server
@@ -125,7 +125,7 @@ class ConnectionTest < Minitest::Test
   end
 
   def test_concurrent_first_use_records_every_server
-    known = Rubicon::KnownServers.new(@known_path)
+    known = Gemdrop::KnownServers.new(@known_path)
     threads = (1..8).map { |i| Thread.new { known.check!("server#{i}:6697", format("%064x", i)) } }
 
     assert_equal [:new] * 8, threads.map(&:value)
@@ -136,7 +136,7 @@ class ConnectionTest < Minitest::Test
     File.write(@known_path, "localhost:#{@port} #{pin}\n", perm: 0o644)
     start_server
 
-    assert_raises(Rubicon::ConfigError) { tofu_connection.connect }
+    assert_raises(Gemdrop::ConfigError) { tofu_connection.connect }
   end
 
   def test_minimum_tls_version_is_enforced

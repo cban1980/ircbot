@@ -26,7 +26,7 @@ class EventlogPluginTest < Minitest::Test
     path = File.join(@tmpdir, "config.yml")
     File.write(path, <<~YAML + settings.gsub(/^/, "    "), perm: 0o600)
       server: irc.example.net
-      nick: ModeBot
+      nick: Gemdrop
       admins: [root]
       channels: ["#chan"]
       require_secure_users: false
@@ -35,12 +35,12 @@ class EventlogPluginTest < Minitest::Test
     YAML
     @conn = FakeConnection.new
     logger = Logger.new(@log)
-    logger.formatter = Rubicon::LogFormatter.new # feeds :log events
-    @bot = Rubicon::Bot.new(Rubicon::Config.load(path), connection: @conn, store: @store, hasher: TEST_HASHER,
+    logger.formatter = Gemdrop::LogFormatter.new # feeds :log events
+    @bot = Gemdrop::Bot.new(Gemdrop::Config.load(path), connection: @conn, store: @store, hasher: TEST_HASHER,
                                                        plugin_pool: InlinePool.new, logger: logger)
     @bot.send(:start_log_events)
-    @bot.handle(":server 001 ModeBot :Welcome")
-    @bot.handle(":ModeBot!bot@host JOIN #chan")
+    @bot.handle(":server 001 Gemdrop :Welcome")
+    @bot.handle(":Gemdrop!bot@host JOIN #chan")
     @logger = logger
   end
 
@@ -76,17 +76,17 @@ class EventlogPluginTest < Minitest::Test
     @bot.handle("PING :server")
     outgoing = of_type("outgoing")
     assert_includes outgoing.map { |r| r.values_at("nick", "command", "channel", "text") },
-                    ["ModeBot", "PRIVMSG", "#chan", "hello from the bot"]
+                    ["Gemdrop", "PRIVMSG", "#chan", "hello from the bot"]
     refute(outgoing.any? { |r| r["command"] == "PONG" })
   end
 
   def test_private_messages_hosts_channels_and_nicks
     start
-    @bot.handle(":alice!a@a.example PRIVMSG ModeBot :secret-ish chat")
+    @bot.handle(":alice!a@a.example PRIVMSG Gemdrop :secret-ish chat")
     assert_empty of_type("private_message"), "private messages are off by default"
 
     start("private_messages: true\nhide_hosts: true\nignore_channels: ['#noisy']\nignore_nicks: [spammer]\n")
-    @bot.handle(":alice!a@a.example PRIVMSG ModeBot :now logged")
+    @bot.handle(":alice!a@a.example PRIVMSG Gemdrop :now logged")
     @bot.handle(":bob!b@b.example PRIVMSG #noisy :not logged")
     @bot.handle(":spammer!s@s.example PRIVMSG #chan :not logged")
     private_message = of_type("private_message").last
@@ -106,7 +106,7 @@ class EventlogPluginTest < Minitest::Test
 
   def test_logging_from_a_log_hook_does_not_loop
     loud = <<~RUBY
-      class Loud < Rubicon::Plugin
+      class Loud < Gemdrop::Plugin
         on(:log) { |event| log.info("saw: \#{event.text}") unless event.text.start_with?("saw:") }
       end
     RUBY
@@ -161,22 +161,22 @@ class EventlogPluginTest < Minitest::Test
   end
 
   def test_logsearch_for_channel_ops
-    Rubicon::Accounts.new(@store, TEST_HASHER).register("root", "password123")
+    Gemdrop::Accounts.new(@store, TEST_HASHER).register("root", "password123")
     start
-    @bot.handle(":root!r@root.host PRIVMSG ModeBot :IDENTIFY password123")
+    @bot.handle(":root!r@root.host PRIVMSG Gemdrop :IDENTIFY password123")
     @bot.handle(":alice!a@a.example PRIVMSG #chan :the deploy is broken")
     @bot.handle(":bob!b@b.example PRIVMSG #chan :unrelated")
     @conn.clear
-    @bot.handle(":root!r@root.host PRIVMSG ModeBot :LOGSEARCH #chan deploy")
+    @bot.handle(":root!r@root.host PRIVMSG Gemdrop :LOGSEARCH #chan deploy")
     assert_match(/\ANOTICE root :\d{4}-\d\d-\d\d \d\d:\d\d <alice> the deploy is broken\z/, @conn.lines.grep(/NOTICE root/).first)
 
-    @bot.handle(":nobody!n@n.host PRIVMSG ModeBot :LOGSEARCH #chan deploy")
+    @bot.handle(":nobody!n@n.host PRIVMSG Gemdrop :LOGSEARCH #chan deploy")
     assert_includes @conn.lines, "NOTICE nobody :You must IDENTIFY first."
   end
 
   def test_other_plugins_follow_records_live
     follower = <<~RUBY
-      class Follower < Rubicon::Plugin
+      class Follower < Gemdrop::Plugin
         attr_reader :seen
         listen("log.record") { |record, _info| (@seen ||= []) << record }
       end
@@ -197,7 +197,7 @@ class EventlogPluginTest < Minitest::Test
   def test_log_records_go_to_the_network_they_are_about
     path = File.join(@tmpdir, "networks.yml")
     File.write(path, <<~YAML, perm: 0o600)
-      nick: ModeBot
+      nick: Gemdrop
       plugins_dir: #{@plugins_dir}
       networks:
         One:
@@ -206,8 +206,8 @@ class EventlogPluginTest < Minitest::Test
           server: two.example.net
     YAML
     logger = Logger.new(@log)
-    logger.formatter = Rubicon::LogFormatter.new
-    sup = Rubicon::Supervisor.new(Rubicon::Config.load(path), store: @store, hasher: TEST_HASHER, logger: logger,
+    logger.formatter = Gemdrop::LogFormatter.new
+    sup = Gemdrop::Supervisor.new(Gemdrop::Config.load(path), store: @store, hasher: TEST_HASHER, logger: logger,
                                                             connection_factory: ->(_net) { FakeConnection.new })
     bots = sup.bots
     bots.each { |b| b.send(:start_log_events) }

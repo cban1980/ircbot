@@ -5,7 +5,7 @@ class NetworksTest < Minitest::Test
   include StoreHelper
 
   CONFIG = <<~YAML.freeze
-    nick: ModeBot
+    nick: Gemdrop
     admins: [root]
     require_secure_users: false
     networks:
@@ -35,19 +35,20 @@ class NetworksTest < Minitest::Test
     super
     @config_path = File.join(@tmpdir, "config.yml")
     write_config(CONFIG)
+    install_plugins(File.join(@tmpdir, "plugins"), "chanserv") # channel commands
     @conns = {}
   end
 
   def write_config(yaml) = File.write(@config_path, yaml, perm: 0o600)
 
   def supervisor(factory: ->(net) { @conns[net["id"]] = FakeConnection.new })
-    @supervisor = Rubicon::Supervisor.new(Rubicon::Config.load(@config_path), config_path: @config_path,
+    @supervisor = Gemdrop::Supervisor.new(Gemdrop::Config.load(@config_path), config_path: @config_path,
                                                                             store: @store, hasher: TEST_HASHER,
                                                                             connection_factory: factory,
                                                                             logger: Logger.new(nil))
   end
 
-  def welcome(network, nick = "ModeBot")
+  def welcome(network, nick = "Gemdrop")
     bot = @supervisor.bot(network)
     bot.handle(":server 001 #{nick} :Welcome")
     bot.handle(":server 005 #{nick} NETWORK=#{network} :are supported")
@@ -59,11 +60,11 @@ class NetworksTest < Minitest::Test
   # --- config ------------------------------------------------------------
 
   def test_networks_inherit_top_level_settings
-    config = Rubicon::Config.load(@config_path)
+    config = Gemdrop::Config.load(@config_path)
     ircnet, efnet = config["networks"]
 
     assert_equal %w[IRCnet EFnet], config["networks"].map { |net| net["id"] }
-    assert_equal "ModeBot", ircnet["nick"]
+    assert_equal "Gemdrop", ircnet["nick"]
     assert_equal "OtherBot", efnet["nick"]
     assert_equal ["#gunnit"], efnet["channels"]
     assert_equal ["root"], efnet["admins"]
@@ -72,10 +73,10 @@ class NetworksTest < Minitest::Test
 
   def test_single_server_config_is_one_network
     write_config("server: irc.example.net\nnetwork: IRCnet\n")
-    assert_equal ["IRCnet"], Rubicon::Config.load(@config_path)["networks"].map { |net| net["id"] }
+    assert_equal ["IRCnet"], Gemdrop::Config.load(@config_path)["networks"].map { |net| net["id"] }
 
     write_config("server: irc.example.net\n")
-    assert_equal ["default"], Rubicon::Config.load(@config_path)["networks"].map { |net| net["id"] }
+    assert_equal ["default"], Gemdrop::Config.load(@config_path)["networks"].map { |net| net["id"] }
   end
 
   def test_rejects_bad_network_configs
@@ -88,24 +89,23 @@ class NetworksTest < Minitest::Test
       "networks: {}\n" => /mapping of network names/
     }.each do |yaml, error|
       write_config(yaml)
-      assert_raises(Rubicon::ConfigError) { Rubicon::Config.load(@config_path) }.then { |e| assert_match(error, e.message) }
+      assert_raises(Gemdrop::ConfigError) { Gemdrop::Config.load(@config_path) }.then { |e| assert_match(error, e.message) }
     end
   end
 
   # --- channels ------------------------------------------------------------
 
   def test_channels_are_per_network
-    Rubicon::Accounts.new(@store, TEST_HASHER).register("alice", "password123")
-    ircnet = Rubicon::Channels.new(@store, network: "IRCnet")
-    efnet = Rubicon::Channels.new(@store, network: "EFnet")
+    Gemdrop::Accounts.new(@store, TEST_HASHER).register("alice", "password123")
+    ircnet = Gemdrop::Channels.new(@store, network: "IRCnet")
+    efnet = Gemdrop::Channels.new(@store, network: "EFnet")
     ircnet.register("#same", "alice")
 
     refute efnet.registered?("#same")
     efnet.register("#same", "alice")
     ircnet.drop("#same")
     assert efnet.registered?("#same")
-    assert_equal({ "EFnet" => ["#same"] }, Rubicon::Channels.by_network(@store))
-    assert_equal [%w[EFnet #same]], Rubicon::Channels.owned_anywhere(@store, "alice")
+    assert_equal [%w[EFnet #same]], Gemdrop::Channels.owned_anywhere(@store, "alice")
   end
 
   def test_old_channels_move_to_the_first_network
@@ -115,16 +115,16 @@ class NetworksTest < Minitest::Test
     supervisor
 
     refute(@store.read { |data| data.key?("channels") })
-    assert Rubicon::Channels.new(@store, network: "IRCnet").registered?("#old")
-    refute Rubicon::Channels.new(@store, network: "EFnet").registered?("#old")
+    assert Gemdrop::Channels.new(@store, network: "IRCnet").registered?("#old")
+    refute Gemdrop::Channels.new(@store, network: "EFnet").registered?("#old")
   end
 
   # --- supervisor ------------------------------------------------------------
 
   def test_each_network_joins_its_own_channels
     supervisor
-    Rubicon::Channels.new(@store, network: "EFnet").tap do |efnet|
-      Rubicon::Accounts.new(@store, TEST_HASHER).register("alice", "password123")
+    Gemdrop::Channels.new(@store, network: "EFnet").tap do |efnet|
+      Gemdrop::Accounts.new(@store, TEST_HASHER).register("alice", "password123")
       efnet.register("#registered", "alice")
     end
     welcome("IRCnet")
@@ -135,8 +135,8 @@ class NetworksTest < Minitest::Test
   end
 
   def test_admin_account_works_on_every_network_and_channels_stay_apart
-    Rubicon::Accounts.new(@store, TEST_HASHER).register("root", "password123")
-    Rubicon::Accounts.new(@store, TEST_HASHER).register("alice", "password123")
+    Gemdrop::Accounts.new(@store, TEST_HASHER).register("root", "password123")
+    Gemdrop::Accounts.new(@store, TEST_HASHER).register("alice", "password123")
     supervisor
     ircnet = welcome("IRCnet")
     efnet = welcome("EFnet", "OtherBot")
@@ -149,10 +149,10 @@ class NetworksTest < Minitest::Test
     efnet.handle(":root!r@root.host PRIVMSG OtherBot :CHANREGISTER #gunnit alice")
     assert_includes @conns["EFnet"].lines, "NOTICE root :#gunnit registered with owner alice."
 
-    ircnet.handle(":root!r@root.host PRIVMSG ModeBot :IDENTIFY password123")
-    ircnet.handle(":root!r@root.host PRIVMSG ModeBot :ACCESS #gunnit LIST")
+    ircnet.handle(":root!r@root.host PRIVMSG Gemdrop :IDENTIFY password123")
+    ircnet.handle(":root!r@root.host PRIVMSG Gemdrop :ACCESS #gunnit LIST")
     assert_includes @conns["IRCnet"].lines, "NOTICE root :#gunnit is not registered."
-    ircnet.handle(":root!r@root.host PRIVMSG ModeBot :CHANREGISTER #gunnit alice")
+    ircnet.handle(":root!r@root.host PRIVMSG Gemdrop :CHANREGISTER #gunnit alice")
     assert_includes @conns["IRCnet"].lines, "NOTICE root :#gunnit registered with owner alice."
   end
 
@@ -185,7 +185,7 @@ class NetworksTest < Minitest::Test
 
   def test_reload_applies_each_networks_settings
     supervisor
-    welcome("IRCnet").handle(":ModeBot!b@host JOIN #home")
+    welcome("IRCnet").handle(":Gemdrop!b@host JOIN #home")
     welcome("EFnet", "OtherBot").handle(":OtherBot!b@host JOIN #gunnit")
     @conns.each_value(&:clear)
     write_config(CONFIG.sub('channels: ["#gunnit"]', 'channels: ["#gunnit", "#more"]'))
@@ -205,16 +205,16 @@ class NetworksTest < Minitest::Test
 
   def test_run_raises_when_every_network_fails
     write_config(CONFIG.sub(/  EFnet:.*\z/m, ""))
-    lines = [":server 001 ModeBot :Welcome\r\n", ":server 005 ModeBot NETWORK=Other :are supported\r\n"]
+    lines = [":server 001 Gemdrop :Welcome\r\n", ":server 005 Gemdrop NETWORK=Other :are supported\r\n"]
     supervisor(factory: ->(_net) { ScriptedConnection.new(lines) })
 
-    error = assert_raises(Rubicon::ConfigError) { @supervisor.run(handle_signals: false) }
+    error = assert_raises(Gemdrop::ConfigError) { @supervisor.run(handle_signals: false) }
     assert_match(/IRCnet: .*Other network, not IRCnet/, error.message)
   end
 
   def test_one_failing_network_leaves_the_others_running
     lines = {
-      "IRCnet" => [":server 001 ModeBot :Welcome\r\n", ":server 005 ModeBot NETWORK=Other :are supported\r\n"],
+      "IRCnet" => [":server 001 Gemdrop :Welcome\r\n", ":server 005 Gemdrop NETWORK=Other :are supported\r\n"],
       "EFnet" => [":server 001 OtherBot :Welcome\r\n"]
     }
     supervisor(factory: ->(net) { ScriptedConnection.new(lines[net["id"]]) })

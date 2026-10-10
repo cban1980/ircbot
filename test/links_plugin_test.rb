@@ -5,7 +5,7 @@ require "test_helper"
 class LinksPluginTest < Minitest::Test
   include StoreHelper
 
-  Response = Rubicon::SafeHttp::Response
+  Response = Gemdrop::SafeHttp::Response
 
   # Returns canned responses by URL prefix and records what was fetched.
   class FakeHttp
@@ -19,7 +19,7 @@ class LinksPluginTest < Minitest::Test
       @fetched << url
       @headers << headers
       _prefix, response = @routes.find { |prefix, _| url.start_with?(prefix) }
-      raise Rubicon::SafeHttp::Refused, "no route" unless response
+      raise Gemdrop::SafeHttp::Refused, "no route" unless response
 
       response
     end
@@ -38,17 +38,17 @@ class LinksPluginTest < Minitest::Test
     path = File.join(@tmpdir, "config.yml")
     File.write(path, <<~YAML + settings.gsub(/^/, "    "), perm: 0o600)
       server: irc.example.net
-      nick: ModeBot
+      nick: Gemdrop
       channels: ["#chan"]
       require_secure_users: false
       plugins:
         links:
     YAML
     @conn = FakeConnection.new
-    @bot = Rubicon::Bot.new(Rubicon::Config.load(path), connection: @conn, store: @store, hasher: TEST_HASHER,
+    @bot = Gemdrop::Bot.new(Gemdrop::Config.load(path), connection: @conn, store: @store, hasher: TEST_HASHER,
                                                        http: @http, plugin_pool: InlinePool.new, logger: Logger.new(nil))
-    @bot.handle(":server 001 ModeBot :Welcome")
-    @bot.handle(":ModeBot!bot@host JOIN #chan")
+    @bot.handle(":server 001 Gemdrop :Welcome")
+    @bot.handle(":Gemdrop!bot@host JOIN #chan")
     @conn.clear
     plugin
   end
@@ -77,10 +77,10 @@ class LinksPluginTest < Minitest::Test
   # The line the plugin would post for a URL (fetching through FakeHttp).
   # Runs as a background job would; http_get refuses to run elsewhere.
   def preview(url)
-    Thread.current[:rubicon_background] = true
+    Thread.current[:gemdrop_background] = true
     plugin.send(:preview_line, url, plugin.settings).tap { plugin.instance_variable_get(:@cache).clear }
   ensure
-    Thread.current[:rubicon_background] = nil
+    Thread.current[:gemdrop_background] = nil
   end
 
   # --- finding links ------------------------------------------------------------------
@@ -109,8 +109,8 @@ class LinksPluginTest < Minitest::Test
   def test_ignores_own_messages_private_messages_and_skip_word
     start
     page
-    chat("ModeBot", "https://example.com/", host: "bot@host")
-    @bot.handle(":alice!a@a.host PRIVMSG ModeBot :https://example.com/")
+    chat("Gemdrop", "https://example.com/", host: "bot@host")
+    @bot.handle(":alice!a@a.host PRIVMSG Gemdrop :https://example.com/")
     chat("alice", "https://example.com/ nopreview")
     assert_empty @http.fetched
   end
@@ -118,8 +118,8 @@ class LinksPluginTest < Minitest::Test
   def test_private_messages_when_enabled
     start("private_messages: true\ncache_minutes: 0\n")
     page
-    @bot.handle(":alice!a@a.host PRIVMSG ModeBot :https://example.com/")
-    @bot.handle(":alice!a@a.host PRIVMSG ModeBot :TITLE https://example.com/other")
+    @bot.handle(":alice!a@a.host PRIVMSG Gemdrop :https://example.com/")
+    @bot.handle(":alice!a@a.host PRIVMSG Gemdrop :TITLE https://example.com/other")
     assert_equal ["PRIVMSG alice :[example.com] Example Domain"], @conn.lines.grep(/Example/).first(1)
     assert_equal 1, @http.fetched.count("https://example.com/other"), "TITLE is a command, not also a link to preview"
   end
@@ -223,7 +223,7 @@ class LinksPluginTest < Minitest::Test
     start(%(channel_settings:\n  "#quiet":\n    message_type: notice\n    show_description: true\n))
     @http.route("https://example.com/", html("https://example.com/",
                                              %(<title>T</title><meta name="description" content="About it">)))
-    @bot.handle(":ModeBot!bot@host JOIN #quiet")
+    @bot.handle(":Gemdrop!bot@host JOIN #quiet")
     @conn.clear
     chat("alice", "https://example.com/")
     chat("alice", "https://example.com/", channel: "#quiet")
@@ -396,8 +396,8 @@ class LinksPluginTest < Minitest::Test
   def test_title_command
     start
     page
-    @bot.handle(":alice!a@a.host PRIVMSG ModeBot :TITLE https://example.com/")
-    @bot.handle(":bob!b@b.host PRIVMSG ModeBot :PREVIEW nothing here")
+    @bot.handle(":alice!a@a.host PRIVMSG Gemdrop :TITLE https://example.com/")
+    @bot.handle(":bob!b@b.host PRIVMSG Gemdrop :PREVIEW nothing here")
     assert_equal ["NOTICE alice :[example.com] Example Domain", "NOTICE bob :Usage: TITLE <url>"], @conn.lines
   end
 
@@ -409,12 +409,12 @@ class LinksPluginTest < Minitest::Test
     @bot.handle(":carol!c@c.host JOIN #chan")
     @conn.clear
 
-    @bot.handle(":carol!c@c.host PRIVMSG ModeBot :LINKS #chan 5")
+    @bot.handle(":carol!c@c.host PRIVMSG Gemdrop :LINKS #chan 5")
     notices = @conn.lines.grep(/\ANOTICE carol/)
     assert_match(%r{\ANOTICE carol :\d+s ago, bob: https://unknown.example/page\z}, notices[0])
     assert_match(/alice: https:\/\/example.com\/ — \[example.com\] Example Domain\z/, notices[1])
 
-    @bot.handle(":mallory!m@m.host PRIVMSG ModeBot :LINKS #secret")
+    @bot.handle(":mallory!m@m.host PRIVMSG Gemdrop :LINKS #secret")
     assert_equal ["NOTICE mallory :You're not on #secret."], @conn.lines.grep(/\ANOTICE mallory/)
   end
 
@@ -429,7 +429,7 @@ class LinksPluginTest < Minitest::Test
 
   def test_publishes_previews_to_other_plugins
     File.write(File.join(@plugins_dir, "listener.rb"), <<~RUBY, perm: 0o600)
-      class Listener < Rubicon::Plugin
+      class Listener < Gemdrop::Plugin
         attr_reader :got
         listen("link") { |payload, _info| (@got ||= []) << payload }
       end

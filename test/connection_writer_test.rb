@@ -6,11 +6,11 @@ require "socket"
 class ConnectionWriterTest < Minitest::Test
   # Faster than real flood control, so the tests don't take seconds.
   def setup
-    @old_rate = Rubicon::Connection::RATE
-    Rubicon::Connection.send(:remove_const, :RATE)
-    Rubicon::Connection.const_set(:RATE, 20.0)
+    @old_rate = Gemdrop::Connection::RATE
+    Gemdrop::Connection.send(:remove_const, :RATE)
+    Gemdrop::Connection.const_set(:RATE, 20.0)
     @server = TCPServer.new("127.0.0.1", 0)
-    @conn = Rubicon::Connection.new(host: "127.0.0.1", port: @server.addr[1], tls: false)
+    @conn = Gemdrop::Connection.new(host: "127.0.0.1", port: @server.addr[1], tls: false)
     @conn.connect
     @peer = @server.accept
   end
@@ -19,8 +19,8 @@ class ConnectionWriterTest < Minitest::Test
     @conn.close
     @peer.close
     @server.close
-    Rubicon::Connection.send(:remove_const, :RATE)
-    Rubicon::Connection.const_set(:RATE, @old_rate)
+    Gemdrop::Connection.send(:remove_const, :RATE)
+    Gemdrop::Connection.const_set(:RATE, @old_rate)
   end
 
   def received(count, timeout: 10)
@@ -80,6 +80,28 @@ class ConnectionWriterTest < Minitest::Test
     end
   end
 
+  # SIGUSR1: the server hangs up on the QUIT and the bot reconnects while
+  # the signal thread's close is still waiting; that close must not end
+  # the new connection.
+  def test_a_late_close_leaves_a_newer_connection_open
+    stub_const(:RATE, 2.0) do
+      6.times { |i| @conn.write("PRIVMSG #c :#{i}") } # the 6th waits its turn
+      closer = Thread.new { @conn.close(flush: true) }
+      received(6)
+      # The last line is out; before the closer's next check: the read
+      # loop's close, the reconnect and lines queued on the new connection.
+      @conn.close
+      @conn.connect
+      8.times { |i| @conn.write("PRIVMSG #c :new #{i}") }
+      second = @server.accept
+      closer.join
+      assert @conn.write("PRIVMSG #c :still open")
+      assert_equal "PRIVMSG #c :new 0", second.gets&.chomp
+    ensure
+      second&.close
+    end
+  end
+
   def test_writing_after_close_raises
     @conn.close
     assert_raises(IOError) { @conn.write("PRIVMSG #c :late") }
@@ -88,12 +110,12 @@ class ConnectionWriterTest < Minitest::Test
   private
 
   def stub_const(name, value)
-    old = Rubicon::Connection.const_get(name)
-    Rubicon::Connection.send(:remove_const, name)
-    Rubicon::Connection.const_set(name, value)
+    old = Gemdrop::Connection.const_get(name)
+    Gemdrop::Connection.send(:remove_const, name)
+    Gemdrop::Connection.const_set(name, value)
     yield
   ensure
-    Rubicon::Connection.send(:remove_const, name)
-    Rubicon::Connection.const_set(name, old)
+    Gemdrop::Connection.send(:remove_const, name)
+    Gemdrop::Connection.const_set(name, old)
   end
 end

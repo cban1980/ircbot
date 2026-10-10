@@ -12,10 +12,11 @@
 .env
 .env.*
 
-# Backups made by bin/rubicon-docker backup (contain the pepper and hashes)
+# Backups made by bin/gemdrop-docker backup (contain the pepper and hashes)
 *.tar
 *.tar.gz
 *.tgz
+gemdrop-backup-*
 rubicon-backup-*
 ircbot-backup-*
 

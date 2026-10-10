@@ -11,7 +11,7 @@
 #       ignore_nicks: [otherbot]
 #
 # The bot must be in every linked channel (configured or registered).
-class Relay < Rubicon::Plugin
+class Relay < Gemdrop::Plugin
   description "Relays chat between channels on different networks"
   setting "links", default: [], type: :list
   setting "events", default: %w[message action], type: :list
@@ -22,10 +22,10 @@ class Relay < Rubicon::Plugin
 
   def setup
     unknown = settings["events"] - EVENTS
-    raise Rubicon::Error, "unknown relay events: #{unknown.join(', ')} (use #{EVENTS.join(', ')})" if unknown.any?
+    raise Gemdrop::Error, "unknown relay events: #{unknown.join(', ')} (use #{EVENTS.join(', ')})" if unknown.any?
 
     @links = settings["links"].map do |link|
-      raise Rubicon::Error, "each relay link must be a list of Network/#channel" unless link.is_a?(Array) && link.size >= 2
+      raise Gemdrop::Error, "each relay link must be a list of Network/#channel" unless link.is_a?(Array) && link.size >= 2
 
       link.map { |endpoint| parse(endpoint) }
     end
@@ -52,11 +52,11 @@ class Relay < Rubicon::Plugin
   private
 
   def relay(channel, nick, text, event)
-    return if nick.nil? || Rubicon::Casemap.eq?(nick, bot_nick)
+    return if nick.nil? || Gemdrop::Casemap.eq?(nick, bot_nick)
 
     remember(channel, nick)
     return unless settings["events"].include?(event)
-    return if settings["ignore_nicks"].any? { |n| Rubicon::Casemap.eq?(n, nick) }
+    return if settings["ignore_nicks"].any? { |n| Gemdrop::Casemap.eq?(n, nick) }
 
     targets_for(channel).each do |net, target|
       next unless rate_limit("#{net}/#{target}", limit: settings["max_per_10s"], per: 10)
@@ -72,7 +72,7 @@ class Relay < Rubicon::Plugin
           .uniq
   end
 
-  def here?(net, chan, channel) = net.casecmp?(network) && Rubicon::Casemap.eq?(chan, channel)
+  def here?(net, chan, channel) = net.casecmp?(network) && Gemdrop::Casemap.eq?(chan, channel)
 
   def remember(channel, nick)
     (@last_seen ||= Hash.new { |hash, k| hash[k] = [] })[key(nick)] |= [channel]
@@ -80,13 +80,13 @@ class Relay < Rubicon::Plugin
 
   def parse(endpoint)
     net, channel = endpoint.to_s.split("/", 2)
-    unless net && channel&.match?(Rubicon::Channels::NAME)
-      raise Rubicon::Error, "relay endpoint #{endpoint.inspect} must look like \"EFnet/#channel\""
+    unless net && channel&.match?(Gemdrop::Channels::NAME)
+      raise Gemdrop::Error, "relay endpoint #{endpoint.inspect} must look like \"EFnet/#channel\""
     end
-    raise Rubicon::Error, "relay: the bot isn't on a network called #{net}" unless networks.any? { |n| n.casecmp?(net) }
+    raise Gemdrop::Error, "relay: the bot isn't on a network called #{net}" unless networks.any? { |n| n.casecmp?(net) }
 
     [networks.find { |n| n.casecmp?(net) }, channel]
   end
 
-  def key(nick) = Rubicon::Casemap.downcase(nick)
+  def key(nick) = Gemdrop::Casemap.downcase(nick)
 end

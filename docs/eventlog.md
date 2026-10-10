@@ -7,7 +7,7 @@ written so that other plugins (and any other program) can parse it
 reliably.
 
 ```sh
-bin/rubicon-docker plugin install contrib/plugins/eventlog.rb
+bin/gemdrop-docker plugin install contrib/plugins/eventlog.rb
 ```
 
 ## Files
@@ -106,7 +106,7 @@ runs (`PLUGIN SET eventlog ...`).
 Live, as records are written:
 
 ```ruby
-class Watcher < Rubicon::Plugin
+class Watcher < Gemdrop::Plugin
   listen "log.record" do |record, _info|
     say("#ops", "#{record['nick']} was kicked from #{record['channel']}") if record["type"] == "kick"
   end
@@ -116,7 +116,7 @@ end
 Past records, with `records` (filters are all optional):
 
 ```ruby
-log = plugin("eventlog") or raise Rubicon::Error, "the eventlog plugin isn't loaded"
+log = plugin("eventlog") or raise Gemdrop::Error, "the eventlog plugin isn't loaded"
 background do
   log.records(from: Date.today - 7, channel: "#linux.se", types: %w[message], text: "ruby", limit: 100)
      .each { |record| ... }

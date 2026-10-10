@@ -41,17 +41,17 @@ require_secure_users: true
 # The nick the bot wants. IRCnet limits nicks to 9 characters. If it is
 # taken, the bot uses alt_nicks (in order), then a numbered variant, and
 # keeps trying to win the primary nick back.
-nick: ModeBot
+nick: Gemdrop
 alt_nicks:
-  - ModeBot_
-  - ModeBot2
+  - Gemdrop_
+  - Gemdrop2
 
 # Username (ident) shown as user@host. Without an identd running, IRCnet
 # shows it with a "~" prefix.
-user: modebot
+user: gemdrop
 
 # Real name shown in WHOIS.
-realname: Ruby IRC registration bot
+realname: Gemdrop IRC bot
 
 # User modes the bot sets on itself after connecting. Empty for none.
 # IRCnet: i = invisible (hidden from WHO/NAMES of users outside its
@@ -60,11 +60,11 @@ umodes: "+i"
 
 # --- Storage ---------------------------------------------------------------
 # Relative paths are resolved against this file's directory.
-data_file: data/rubicon.json
+data_file: data/gemdrop.json
 
 # Secret key mixed into every password hash; generated on first start.
 # Keep it apart from data backups. Losing it makes every account unusable.
-# RUBICON_PEPPER (64+ hex chars) in the environment overrides this file.
+# GEMDROP_PEPPER (64+ hex chars) in the environment overrides this file.
 pepper_file: secret/pepper.key
 
 # Processes that check passwords (scrypt, ~200 ms and ~64 MB each), so
@@ -83,16 +83,9 @@ admins:
 channels:
   - "#mychannel"
 
-# --- CTCP ----------------------------------------------------------------------
-# The bot answers CTCP VERSION, PING, TIME and CLIENTINFO. Plugins can
-# answer other CTCP commands (see docs/plugins.md).
-ctcp:
-  enabled: true
-  version: "Rubicon (Ruby)"
-
 # --- Plugins -----------------------------------------------------------------
 # Ruby files in plugins_dir (one plugin per file, e.g. plugins/dice.rb;
-# examples in contrib/plugins/). Reloading the config ("rubicon-docker
+# examples in contrib/plugins/). Reloading the config ("gemdrop-docker
 # reload") loads new files and reloads changed ones without reconnecting.
 # Plugins run with the bot's full privileges: only install code you trust.
 # Writing plugins: docs/plugins.md.
@@ -105,7 +98,7 @@ gems_dir: gems
 # Optional settings per plugin, keyed by file name. Every plugin file is
 # loaded whether or not it is listed here. The bot's options:
 #   enabled:  false to not load it (default true)
-#   private:  commands work by private message, /msg ModeBot ROLL (default true)
+#   private:  commands work by private message, /msg Gemdrop ROLL (default true)
 #   prefix:   e.g. "!" (quoted) to also accept !roll in channels (default: none)
 #   channels: limit those channel commands to these channels (default: all)
 #   networks: load it only on these networks (default: all)
@@ -116,7 +109,11 @@ plugins:
   # links:
   #   message_type: privmsg   # or notice, which other bots never answer
   #   ignore_nicks: []        # e.g. other bots
-  #   youtube_api_key:        # duration and views; or RUBICON_YOUTUBE_API_KEY
+  #   youtube_api_key:        # duration and views; or GEMDROP_YOUTUBE_API_KEY
+  # CTCP answers (contrib/plugins/ctcp.rb):
+  # ctcp:
+  #   version: "Gemdrop (Ruby)"                   # the CTCP VERSION answer
+  #   answer: [VERSION, PING, TIME, CLIENTINFO]   # which to answer
   # dice:
   #   prefix: "!"
   #   max_dice: 20
@@ -125,7 +122,7 @@ plugins:
 # To be on several networks at once, move server, network, tls_fingerprint
 # and channels into a section per network. Any identity or TLS setting
 # above can also be overridden per network; the others (admins, storage,
-# ctcp, plugins) apply to all. Accounts are shared by all networks;
+# plugins) apply to all. Accounts are shared by all networks;
 # channels are registered per network.
 # networks:
 #   IRCnet:
@@ -137,6 +134,6 @@ plugins:
 #     server: irc.underworld.no
 #     network: EFnet
 #     tls_self_signed: true
-#     nick: ModeBot
+#     nick: Gemdrop
 #     channels:
 #       - "#gunnit"
