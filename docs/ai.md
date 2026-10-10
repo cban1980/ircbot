@@ -118,6 +118,46 @@ bridge address `172.17.0.1`). Without Docker, the defaults work as they are. If 
 reach it, a firewall on this machine may block containers from its ports
 (`AITEST` then times out); allow the Docker bridge to the model's port.
 
+## Searching the channel's history
+
+With a `search_backend`, it answers questions about what was said earlier,
+also long after it dropped out of the conversation it remembers:
+
+```
+<bjorn> Linuks: vad sa anna om sin NAS igår?
+<Linuks> bjorn: Hon sa att hon bytt till btrfs och att snapshots är guld.
+```
+
+The search runs over the [eventlog](eventlog.md) plugin's log of the
+channel (it must be installed), in three steps:
+
+1. The question looks like it is about the past (words like *igår*,
+   *sa*, *minns*, *förra veckan*, *yesterday*, *said*, *remember*). Other
+   questions are answered as usual, with no search.
+2. The search backend turns the question into a search (whose lines, which
+   days, which words); the bot searches the log itself (no tokens), and
+   the search backend reads the best matches, each with a line around it,
+   and sums up what is relevant in a few sentences.
+3. That summary goes to the backend that answers, with the conversation.
+   If nothing was found, it is told so, and says so instead of guessing.
+
+Use a small, fast model with a quota of its own, so searches don't use up
+the answering model's. Groq counts each model separately, so with the
+same key:
+
+```yaml
+    search_backend: groq-small
+    backends:
+      groq-small: { type: groq, model: openai/gpt-oss-20b, api_key_file: groq.key, options: { reasoning_effort: low } }
+```
+
+A search costs the search backend about 500 tokens in two short requests,
+and the answering backend about 100. Only the channel's own log is
+searched, never other channels or private messages. `search: false` turns
+it off for a channel, and `search_days` (30) limits how far back it looks
+(the eventlog keeps 90 days by default). If the search backend fails, the
+bot answers without a search.
+
 ## Behaviour settings
 
 All can be changed live with `PLUGIN SET ai <setting> <value>` (per
@@ -146,6 +186,9 @@ network) or under `network_settings:`.
 | `per_hour` | 120 | answers per network in all (cost cap) |
 | `ignore_nicks` | `[]` | e.g. other bots, so they don't talk in circles |
 | `error_reply` | "Sorry, my brain isn't answering right now." | said when every backend fails; `""` for silence |
+| `search_backend` | none | a backend that searches the channel's log (see above) |
+| `search` | `true` | search for questions about the past (with `search_backend`); per channel |
+| `search_days` | 30 | how far back searches look (1 to 365) |
 | `log_text` | `false` | log answers (debug level); otherwise only sizes and timing are logged |
 | `backend`, `fallback` | | which backend answers, and the order to try others in |
 

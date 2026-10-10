@@ -618,4 +618,138 @@ class AiPluginTest < Minitest::Test
     query("bob", "hello")
     assert_includes system_text, "In private chats: Keep it very short."
   end
+
+  # --- searching the channel's log -----------------------------------------------------------------
+
+  SEARCH = <<~YAML.freeze
+    chat: true
+    search_backend: helper
+    backends:
+      main: { type: openai, model: gpt-test, api_key_file: openai.key }
+      helper: { type: openai-compatible, model: small, base_url: "http://helper.test/v1", local: true }
+  YAML
+
+  # Stands in for the eventlog plugin: records(...) as it would answer.
+  class FakeEventlog
+    attr_reader :asked
+
+    def initialize(records) = @records = records
+
+    def records(**filters)
+      @asked = filters
+      @records.select { |r| r["channel"] == filters[:channel] }.each
+    end
+  end
+
+  def yesterday = (Time.now.utc - 86_400).strftime("%Y-%m-%d")
+
+  def log_record(nick, text, at: "#{yesterday}T21:10:00Z", type: "message", channel: "#chan")
+    { "ts" => at, "type" => type, "channel" => channel, "nick" => nick, "text" => text }
+  end
+
+  def with_eventlog(records)
+    log = FakeEventlog.new(records)
+    plugin.define_singleton_method(:plugin) { |name| name == "eventlog" ? log : nil }
+    log
+  end
+
+  def plan(json) = openai_text(JSON.generate(json))
+
+  def test_questions_about_the_past_are_searched_by_the_helper
+    start(SEARCH)
+    log = with_eventlog([
+      log_record("anna", "ska vi äta?", at: "#{yesterday}T21:00:00Z"),
+      log_record("zphinx", "Debian 14 släpper 32-bitarsstödet, äntligen", at: "#{yesterday}T21:10:00Z"),
+      log_record("anna", "håller med", at: "#{yesterday}T21:11:00Z"),
+      log_record("zphinx", "dags att sova", at: "#{yesterday}T23:00:00Z"),
+      log_record("zphinx", "debian i andra kanalen", channel: "#other")
+    ])
+    @http.answers << plan("search" => true, "nick" => "zphinx", "from" => yesterday, "to" => yesterday,
+                          "words" => ["Debian"])
+    @http.answers << openai_text("Igår 21:10 sa zphinx att Debian 14 släpper 32-bitarsstödet; anna höll med.")
+    @http.answers << openai_text("Han sa att Debian 14 släpper 32-bit.")
+    assert_equal ["bob: Han sa att Debian 14 släpper 32-bit."], said(chat("bob", "Gemdrop: vad sa zphinx om debian igår?"))
+
+    planning, reading, answering = @http.posts
+    assert_equal "http://helper.test/v1/chat/completions", planning[:url]
+    assert_includes planning[:body]["messages"].first["content"], "Reply with only a JSON object"
+    assert_equal "#chan", log.asked[:channel]
+    assert_equal %w[message action outgoing], log.asked[:types]
+
+    excerpts = reading[:body]["messages"].last["content"]
+    assert_includes excerpts, "<zphinx> Debian 14 släpper 32-bitarsstödet"
+    assert_includes excerpts, "<anna> ska vi äta?", "with the line before"
+    assert_includes excerpts, "<anna> håller med", "and after"
+    refute_includes excerpts, "dags att sova", "only the matching lines and their neighbours"
+    refute_includes excerpts, "andra kanalen", "only this channel"
+
+    assert_equal "https://api.openai.com/v1/chat/completions", answering[:url]
+    assert_includes answering[:body]["messages"].first["content"],
+                    "searched for this question: Igår 21:10 sa zphinx att Debian 14 släpper 32-bitarsstödet"
+  end
+
+  def test_nothing_found_is_said_rather_than_guessed
+    start(SEARCH)
+    with_eventlog([log_record("zphinx", "hej")])
+    @http.answers << plan("search" => true, "nick" => "zphinx", "words" => ["kärnan"])
+    chat("bob", "Gemdrop: vad sa zphinx om kärnan igår?")
+    assert_equal 2, @http.posts.size, "nothing to read: no summary request"
+    assert_includes system_text, "found nothing; say so rather than guess"
+  end
+
+  def test_only_questions_about_the_past_are_searched
+    start(SEARCH)
+    with_eventlog([])
+    chat("bob", "Gemdrop: hur många kärnor har en Raspberry Pi 5?")
+    assert_equal 1, @http.posts.size
+    assert_equal "https://api.openai.com/v1/chat/completions", @http.posts.last[:url]
+  end
+
+  def test_the_helper_can_decide_no_search_is_needed
+    start(SEARCH)
+    with_eventlog([log_record("anna", "hej")])
+    @http.answers << plan("search" => false)
+    chat("bob", "Gemdrop: hur mår du i kväll?")
+    assert_equal 2, @http.posts.size
+    refute_includes system_text, "searched"
+  end
+
+  def test_searching_can_be_off_in_a_channel
+    start(SEARCH + "channel_settings:\n  \"#chan\": { search: false }\n")
+    with_eventlog([log_record("zphinx", "debian")])
+    chat("bob", "Gemdrop: vad sa zphinx igår?")
+    assert_equal 1, @http.posts.size
+  end
+
+  def test_a_failing_helper_or_no_eventlog_still_answers
+    start(SEARCH)
+    with_eventlog([log_record("zphinx", "debian")])
+    @http.answers << self.class.json({ "error" => { "message" => "rate limited" } }, 429)
+    assert_equal ["bob: Hello there"], said(chat("bob", "Gemdrop: vad sa zphinx igår?"))
+    assert_match(/helper failed: search: HTTP 429: rate limited/, @logs.string)
+
+    plugin.define_singleton_method(:plugin) { |_name| nil }
+    @http.posts.clear
+    assert_equal ["anna: Hello there"], said(chat("anna", "Gemdrop: vad sa zphinx igår?"))
+    assert_equal 1, @http.posts.size, "no eventlog: no search"
+  end
+
+  def test_private_chats_are_never_searched
+    start(SEARCH)
+    with_eventlog([log_record("zphinx", "debian")])
+    query("bob", "vad sa zphinx igår?")
+    assert_equal 1, @http.posts.size
+  end
+
+  def test_search_backend_must_exist_and_shows_in_status
+    start(SEARCH.sub("search_backend: helper", "search_backend: nope"))
+    assert_match(/search_backend: no backend called nope/, error)
+
+    start(SEARCH)
+    Gemdrop::Accounts.new(@store, TEST_HASHER).register("root", "password123")
+    @bot.handle(":root!root@root.host PRIVMSG Gemdrop :IDENTIFY password123")
+    status = query("root", "AISTATUS").join("\n")
+    assert_includes status, "Searches: helper (openai-compatible, small)"
+    refute_includes status, "Also configured"
+  end
 end

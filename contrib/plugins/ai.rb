@@ -50,6 +50,12 @@ class Ai < Gemdrop::Plugin
                                desc: "a conversation's size: older lines are forgotten beyond it"
   setting "history_lines", default: 200, type: :integer, min: 1, max: 1000, channel: true,
                            desc: "and at most this many lines"
+  setting "search_backend", type: :string,
+                            desc: "a backend that searches the channel's log for questions about the past"
+  setting "search", default: true, type: :boolean, channel: true,
+                    desc: "search the channel's log for questions about the past (with search_backend)"
+  setting "search_days", default: 30, type: :integer, min: 1, max: 365, channel: true,
+                         desc: "how far back searches look"
   setting "save_memory", default: true, type: :boolean,
                          desc: "keep conversations across reloads and restarts (in the plugin's data folder)"
   setting "max_input_chars", default: 500, type: :integer, min: 20, max: 4000, channel: true
@@ -199,11 +205,25 @@ class Ai < Gemdrop::Plugin
     end
   end
 
+  # Words that suggest a question is about something said earlier; only
+  # those questions are searched for (see search_note).
+  PAST_WORDS = [
+    "igår", "igar", "i går", "förrgår", "i förrgår", "förra", "tidigare", "nyss", "minns", "ihåg", "sa", "sade",
+    "sagt", "skrev", "skrivit", "pratade", "pratat", "nämnde", "nämnt", "frågade", "i morse", "imorse",
+    "i förmiddags", "i eftermiddags", "i kväll", "ikväll", "i natt", "inatt", "dagar sedan", "veckor sedan",
+    "yesterday", "earlier", "remember", "recall", "said", "mentioned", "talked", "wrote", "asked", "ago",
+    "last week", "last night", "last time", "this morning", "the other day"
+  ].freeze
+  PAST = /(?<![[:alnum:]])(?:#{PAST_WORDS.map { |w| Regexp.escape(w).gsub("\\ ", "\\s+") }.join("|")})(?![[:alnum:]])/i
+
   # --- setup -------------------------------------------------------------------------------
 
   def setup
     @backends = parse_backends(settings["backends"])
     @order = backend_order(settings)
+    if (helper = settings["search_backend"]) && !@backends.key?(helper)
+      raise Gemdrop::Error, "search_backend: no backend called #{helper} (configured: #{@backends.keys.join(', ')})"
+    end
     check_language(settings["language"])
     each_channel_override do |label, overrides|
       opts = settings.merge(overrides.transform_keys(&:to_s))
@@ -273,15 +293,11 @@ class Ai < Gemdrop::Plugin
 
   command "AISTATUS", help: "AI backends, their use and errors", admin: true do |ctx, _args|
     @order.each_with_index do |name, i|
-      backend = @backends.fetch(name)
-      stats = @lock.synchronize { @stats[name].dup }
-      average = stats["requests"].positive? ? " ~#{(stats['ms'] / stats['requests']).round}ms" : ""
-      error = @lock.synchronize { @last_error[name] }
-      ctx.reply_privately("#{i.zero? ? 'Answers' : "Fallback #{i}"}: #{name} (#{backend.type}, #{backend.model}): " \
-                          "#{stats['requests']} requests, #{stats['failed']} failed, tokens " \
-                          "#{stats['in']} in / #{stats['out']} out#{average}#{"; last error: #{error}" if error}")
+      ctx.reply_privately("#{i.zero? ? 'Answers' : "Fallback #{i}"}: #{backend_status(name)}")
     end
-    others = @backends.keys - @order
+    helper = settings["search_backend"]
+    ctx.reply_privately("Searches: #{backend_status(helper)}") if helper
+    others = @backends.keys - @order - [helper]
     ctx.reply_privately("Also configured: #{others.join(', ')}") if others.any?
   end
 
@@ -313,6 +329,10 @@ class Ai < Gemdrop::Plugin
     lines << "Privately: just /msg #{bot_nick} <anything>." if settings["chat_private"]
     lines << "I follow the conversation until it goes quiet for #{settings['forget_after_minutes']} minutes " \
              "or gets very long; AIFORGET makes me forget it."
+    if settings["search_backend"] && settings["search"]
+      lines << "Ask me about what was said earlier (\"what did alice say about Debian yesterday?\"): I search this " \
+               "channel's log, the last #{settings['search_days']} days."
+    end
     lines << "What is said to me is sent to an AI service (#{@backends.fetch(@order.first).type})."
     lines.join("\n")
   end
@@ -377,8 +397,10 @@ class Ai < Gemdrop::Plugin
 
     system = system_prompt(channel, opts)
     messages = conversation(key, opts)
+    search = channel && opts["search"] && settings["search_backend"] && question.match?(PAST)
     queued = background do
-      answer_with_fallback(channel, nick, system, messages, reply_to, key, opts)
+      note = search && search_note(channel, question, opts)
+      answer_with_fallback(channel, nick, note ? "#{system}\n\n#{note}" : system, messages, reply_to, key, opts)
     ensure
       release(key)
     end
@@ -461,6 +483,126 @@ class Ai < Gemdrop::Plugin
   end
 
   def redact(text, key) = key.to_s.length >= 8 ? text.gsub(key, "[key]") : text
+
+  # --- searching the channel's log ------------------------------------------------------------
+
+  MAX_SEARCH_RECORDS = 20_000 # lines read from the log per search
+  SEARCH_HITS = 8             # best matching lines, each with a line before and after
+  MAX_EXCERPTS = 4_000        # characters of excerpts the helper reads
+
+  # For a question about the past: the search backend turns it into a
+  # search (who, when, which words), the bot searches the channel's log
+  # (the eventlog plugin) itself, and the search backend sums up what it
+  # found. Returns a note for the answering model's prompt, or nil when
+  # there is nothing to search with (then it answers without one).
+  def search_note(channel, question, opts)
+    helper = @backends.fetch(settings["search_backend"])
+    eventlog = plugin("eventlog") or return nil
+    plan = plan_search(helper, channel, question, opts) or return nil
+    excerpts = search_log(eventlog, channel, plan)
+    where = "#{channel}'s log (#{plan[:from]} to #{plan[:to]}#{", #{plan[:nick]}'s lines" if plan[:nick]}" \
+            "#{", words: #{plan[:words].join(' ')}" if plan[:words].any?})"
+    return "You searched #{where} for this question and found nothing; say so rather than guess." if excerpts.empty?
+
+    summary = ask_helper(helper, <<~TEXT, "Question: #{question}\n\nExcerpts (times UTC):\n#{excerpts}")
+      You read excerpts from an IRC channel's log and write down what is relevant to the question: who
+      said what, and when (date and time, UTC), in at most three short sentences, in the language of the
+      question. Use only the excerpts. If nothing in them is relevant, answer only: NOTHING
+    TEXT
+    return nil unless summary
+    return "You searched #{where} for this question and found nothing relevant; say so rather than guess." if
+      summary.strip.match?(/\ANOTHING\b/)
+
+    "From #{where}, searched for this question: #{summary.strip}"
+  end
+
+  # {nick:, from:, to:, words:} for the question, or nil if it needs no search.
+  def plan_search(helper, channel, question, opts)
+    today = Time.now.utc.to_date
+    nicks = users(channel).map(&:nick).reject { |n| Gemdrop::Casemap.eq?(n, bot_nick) }
+    answer = ask_helper(helper, <<~TEXT, question) or return nil
+      Today is #{today} (UTC). You turn a question asked in the IRC channel #{channel} into a search of
+      the channel's log. People in the channel: #{nicks.first(50).join(', ')}. I am #{bot_nick}.
+      Reply with only a JSON object, nothing else:
+      {"search": true or false (false if it isn't about something said earlier),
+       "nick": the nick whose lines to look for, or null,
+       "from": "YYYY-MM-DD" or null, "to": "YYYY-MM-DD" or null,
+       "words": [at most 5 words to look for, as they were likely written, no filler words]}
+    TEXT
+    json = JSON.parse(answer[/\{.*\}/m].to_s)
+    return nil unless json.is_a?(Hash) && json["search"] != false
+
+    oldest = today - opts["search_days"]
+    from = [date_or(json["from"], oldest), oldest].max
+    to = [date_or(json["to"], today), today].min
+    words = Array(json["words"]).map { |w| w.to_s.downcase.strip }.reject { |w| w.length < 2 }.first(5)
+    nick = json["nick"].is_a?(String) && !json["nick"].strip.empty? ? json["nick"].strip.delete_prefix("@") : nil
+    return nil if words.empty? && nick.nil?
+
+    { nick: nick, from: [from, to].min, to: to, words: words }
+  rescue JSON::ParserError
+    nil
+  end
+
+  def date_or(text, fallback)
+    text.is_a?(String) ? Date.iso8601(text) : fallback
+  rescue Date::Error
+    fallback
+  end
+
+  # The best matching lines of the channel's log, each with the line before
+  # and after, as text; "" if none match.
+  def search_log(eventlog, channel, plan)
+    records = eventlog.records(from: plan[:from], to: plan[:to], types: %w[message action outgoing],
+                               channel: channel, limit: MAX_SEARCH_RECORDS).to_a
+    cutoff = Time.now.utc - 60 # not the question being asked right now
+    records.select! { |record| logged_before?(record, cutoff) }
+    scored = records.each_with_index.filter_map do |record, i|
+      score = search_score(record, plan)
+      [score, i] if score.positive?
+    end
+    best = scored.max_by(SEARCH_HITS) { |score, i| [score, i] }.map(&:last)
+    picked = best.flat_map { |i| [i - 1, i, i + 1] }.select { |i| i >= 0 && i < records.size }.uniq.sort
+    text = +""
+    picked.each do |i|
+      line = log_line(records[i])
+      break if text.length + line.length > MAX_EXCERPTS
+
+      text << line << "\n"
+    end
+    text
+  end
+
+  def logged_before?(record, cutoff)
+    Time.iso8601(record["ts"].to_s) <= cutoff
+  rescue ArgumentError
+    false
+  end
+
+  def search_score(record, plan)
+    return 0 if plan[:nick] && !Gemdrop::Casemap.eq?(record["nick"].to_s, plan[:nick])
+
+    text = record["text"].to_s.downcase
+    return 1 if plan[:words].empty?
+
+    plan[:words].count { |word| text.include?(word) || (word.length > 4 && text.include?(word[0..-2])) }
+  end
+
+  def log_line(record)
+    at = record["ts"].to_s.sub("T", " ")[0, 16]
+    record["type"] == "action" ? "[#{at}] * #{record['nick']} #{record['text']}" : "[#{at}] <#{record['nick']}> #{record['text']}"
+  end
+
+  # One request to the search backend; its answer's text, or nil if it failed.
+  def ask_helper(helper, system, text)
+    started = now
+    answer = complete(helper, system, [{ role: "user", content: text }])
+    record(helper.name, answer, started)
+    answer.text
+  rescue BackendError, Gemdrop::Error => e
+    record_failure(helper.name, "search: #{e.message}")
+    nil
+  end
 
   # --- the conversation ------------------------------------------------------------------
 
@@ -651,6 +793,15 @@ class Ai < Gemdrop::Plugin
     end
     log.info("#{name} answered (#{answer.input_tokens || '?'} in / #{answer.output_tokens || '?'} out tokens, " \
              "#{((now - started) * 1000).round}ms)")
+  end
+
+  def backend_status(name)
+    backend = @backends.fetch(name)
+    stats = @lock.synchronize { @stats[name].dup }
+    average = stats["requests"].positive? ? " ~#{(stats['ms'] / stats['requests']).round}ms" : ""
+    error = @lock.synchronize { @last_error[name] }
+    "#{name} (#{backend.type}, #{backend.model}): #{stats['requests']} requests, #{stats['failed']} failed, tokens " \
+      "#{stats['in']} in / #{stats['out']} out#{average}#{"; last error: #{error}" if error}"
   end
 
   def record_failure(name, message)
