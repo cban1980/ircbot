@@ -1,0 +1,44 @@
+# Runtime config, data and secrets: never commit these.
+# config.yml holds server/admin settings, data/ holds password hashes,
+# secret/ holds the pepper. Use config.example.yml as the template.
+/config.yml
+/data/
+/secret/
+/instance/
+/gems/
+/gems.lock
+*.key
+*.pem
+.env
+.env.*
+
+# Backups made by bin/rubicon-docker backup (contain the pepper and hashes)
+*.tar
+*.tar.gz
+*.tgz
+rubicon-backup-*
+ircbot-backup-*
+
+# Logs and test-run leftovers
+*.log
+testrun.*
+*.pid
+status.json
+
+# Ruby / tooling
+/.bundle/
+/vendor/
+/coverage/
+/tmp/
+*.gem
+.ruby-version
+.mise.toml
+.claude/
+
+# Editors and OS
+.vscode/
+.idea/
+.zed/
+*.swp
+*~
+.DS_Store
