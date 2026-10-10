@@ -554,4 +554,68 @@ class AiPluginTest < Minitest::Test
     assert_equal({ "Default" => { "#Chan" => { "persona" => "Pirate.", "language" => "Finnish" } } },
                  plugin.settings["channel_settings"])
   end
+
+  # --- conversations that last ------------------------------------------------------------------
+
+  def contents = @http.posts.last[:body]["messages"].drop(1).map { |m| m["content"] }
+
+  def freeze_clock(at)
+    @clock_at = at
+    plugin.define_singleton_method(:clock) { @test_clock.call }
+    plugin.instance_variable_set(:@test_clock, -> { @clock_at })
+  end
+
+  def test_a_conversation_goes_on_until_it_goes_quiet
+    start(DEFAULT + "forget_after_minutes: 30\n")
+    freeze_clock(1_000_000.0)
+    chat("bob", "Gemdrop: my name is Bob")
+    @clock_at += 29 * 60
+    chat("bob", "Gemdrop: what's my name?")
+    assert_equal ["<bob> my name is Bob", "Hello there", "<bob> what's my name?"], contents, "carries on"
+
+    @clock_at += 31 * 60
+    chat("bob", "Gemdrop: and now?")
+    assert_equal ["<bob> and now?"], contents, "after 30 quiet minutes it starts over"
+  end
+
+  def test_conversations_survive_reloads_and_restarts
+    start
+    chat("bob", "Gemdrop: remember the word kumquat")
+    path = File.join(@tmpdir, "config.yml")
+    File.write(path, File.read(path) + "    language: Swedish\n", perm: 0o600) # a change reloads the plugin
+    @bot.reload_config
+    assert_includes plugin.settings["language"], "Swedish"
+    chat("bob", "Gemdrop: which word?")
+    assert_equal "<bob> remember the word kumquat", contents.first, "kept across the reload"
+
+    start # a new bot process, same data
+    chat("bob", "Gemdrop: still?")
+    assert_equal "<bob> remember the word kumquat", contents.first, "and across a restart"
+    saved = Dir[File.join(@tmpdir, "data", "plugins", "**", "conversations.json")]
+    assert_equal 1, saved.size
+    assert_equal "600", format("%o", File.stat(saved.first).mode & 0o777)
+  end
+
+  def test_save_memory_off_keeps_nothing_on_disk
+    start
+    chat("bob", "Gemdrop: hello")
+    plugin.send(:save_memory)
+    start(DEFAULT + "save_memory: false\n")
+    chat("bob", "Gemdrop: hi again")
+    assert_equal ["<bob> hi again"], contents
+    assert_empty Dir[File.join(@tmpdir, "data", "plugins", "**", "conversations.json")]
+  end
+
+  def test_instructions_per_channel
+    start(DEFAULT + <<~YAML)
+      instructions: Keep it very short.
+      channel_settings:
+        "#chan": { instructions: "Talk like a pirate about %{channel}." }
+    YAML
+    chat("bob", "Gemdrop: hi")
+    assert_includes system_text, "In #chan: Talk like a pirate about #chan."
+    refute_includes system_text, "Keep it very short."
+    query("bob", "hello")
+    assert_includes system_text, "In private chats: Keep it very short."
+  end
 end

@@ -23,10 +23,14 @@ bin/gemdrop-docker plugin install contrib/plugins/ai.rb   # loads it right away
 | `AITEST [backend]` | bot admins, privately: a test request, with the answer and timing |
 | `HELP chat` | where and how to talk to it |
 
-It remembers the conversation: by default the last 20 lines of each chat
-channel, for an hour, including what others said there (so "what do
-you think of that?" works). Private conversations are kept per user.
-Nothing is written to disk; a reload or restart forgets everything.
+It follows the conversation: each chat channel's, including what others
+say there (so "what do you think of that?" works), and each user's
+private one. A conversation goes on until it goes quiet for
+`forget_after_minutes` (30), then the next line starts a new one; when it
+grows beyond `max_context_chars` (12,000 characters, about 3,000 tokens)
+its oldest lines are forgotten. Conversations are saved in the plugin's
+private data folder, so reloads, updates and restarts don't interrupt
+them (`save_memory: false` keeps them in memory only).
 
 ## Setting it up
 
@@ -126,11 +130,13 @@ network) or under `network_settings:`.
 | `allowed` | `anyone` | or `identified` (a bot account) or `admins` |
 | `mention_anywhere` | `false` | also answer lines that name it anywhere, not only `Nick: ...` |
 | `language` | `""` | the language it answers in, e.g. `Swedish`; empty: the one it is spoken to in |
+| `instructions` | `""` | how to behave, on top of the persona: the channel's topic, tone, rules ("Answer Linux questions; be patient with beginners"). Per channel, it's the best place for what makes each channel different. `%{nick}`, `%{channel}`, `%{network}` are filled in |
 | `persona` | a friendly regular | who it is; `%{nick}`, `%{channel}`, `%{network}` are filled in. The plugin adds the IRC ground rules (plain text, short, can't take actions) |
 | `listen` | `true` | use channel lines not addressed to it as context; `false` sends only questions to it and its answers |
-| `history_lines` | 20 | lines remembered per conversation |
-| `history_minutes` | 60 | how long they are remembered |
-| `max_context_chars` | 8000 | oldest lines are left out beyond this (cost) |
+| `forget_after_minutes` | 30 | a conversation ends after this long without new lines (1 to 10080) |
+| `max_context_chars` | 12000 | a conversation's size; its oldest lines are forgotten beyond this (and it's what each answer costs) |
+| `history_lines` | 200 | and at most this many lines |
+| `save_memory` | `true` | keep conversations across reloads and restarts (`data/plugins/<network>/ai/`); `false`: in memory only |
 | `max_input_chars` | 500 | longer questions are refused |
 | `max_reply_lines` | 3 | lines per answer (cut with `...`) |
 | `max_line_bytes` | 400 | long lines are wrapped |
@@ -148,9 +154,10 @@ Switch the backend live with `PLUGIN SET ai backend local`.
 ### Per channel
 
 Everything about a channel goes under `channel_settings`: whether it
-talks there (`chat`), and `language`, `persona`, `backend`, `fallback`,
-`allowed`, `mention_anywhere`, `listen`, the `history_*` and `max_*`
-settings, `channel_per_minute` and `error_reply`. The backends are
+talks there (`chat`), and `instructions`, `language`, `persona`,
+`backend`, `fallback`, `allowed`, `mention_anywhere`, `listen`,
+`forget_after_minutes`, `history_lines`, the `max_*` settings,
+`channel_per_minute` and `error_reply`. The backends are
 configured once, for every network; `backend` is the default, and a
 channel can pick another:
 
@@ -165,7 +172,12 @@ plugins:
       gemini: { type: gemini, model: gemini-3.5-flash-lite, api_key_file: gemini.key }
     channel_settings:
       IRCnet:                                    # IRCnet's channels
-        "#linux.se": { chat: true, backend: gemini, language: Swedish }
+        "#linux.se":
+          chat: true
+          language: Swedish
+          instructions: >-
+            This is a Swedish Linux channel. Help with Linux questions,
+            give exact commands, and be patient with beginners.
       EFnet:                                     # EFnet's channels
         "#gunnit": { chat: true, max_reply_lines: 2 }
         "#linux.se": { chat: true, language: Finnish }
