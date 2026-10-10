@@ -164,7 +164,9 @@ class UptimeTest < Minitest::Test
     end
     assert_match(/Dropped line.*not owned/, @log.string)
 
-    wrong = Gemdrop::Bot.new(Gemdrop::Config::DEFAULTS.merge("server" => "x", "network" => "IRCnet"),
+    wrong = Gemdrop::Bot.new(Gemdrop::Config::DEFAULTS.merge("server" => "x", "network" => "IRCnet",
+                                                             "status_file" => File.join(@tmpdir, "wrong.json"),
+                                                             "plugins_dir" => File.join(@tmpdir, "plugins")),
                             connection: FakeConnection.new, store: @store, hasher: TEST_HASHER, logger: Logger.new(nil))
     assert_raises(Gemdrop::WrongNetworkError) { wrong.handle(":server 005 Bot NETWORK=EFnet :are supported") }
   end

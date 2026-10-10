@@ -74,7 +74,6 @@ begin
   store = Gemdrop::Store.new(config["data_file"])
   hasher = Gemdrop::PasswordHasher.new(pepper: Gemdrop::Pepper.load(path: config["pepper_file"]))
   accounts = Gemdrop::Accounts.new(store, hasher, max_accounts: config["max_accounts"])
-  Gemdrop::Channels.adopt_legacy!(store, config["networks"].first["id"])
   network_ids = config["networks"].map { |net| net["id"] }
   network = if network_name
               network_ids.find { |id| id.casecmp?(network_name) } or

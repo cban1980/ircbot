@@ -28,14 +28,11 @@ begin
     store = Gemdrop::Store.new(config["data_file"])
     hasher = Gemdrop::PasswordHasher.new(pepper: Gemdrop::Pepper.load(path: config["pepper_file"]))
     accounts = Gemdrop::Accounts.new(store, hasher)
-    # Read-only: channels from before networks existed are listed under the
-    # first network, where the bot moves them when it starts.
-    legacy = store.read { |data| (data["channels"] || {}).values.map { |c| c["name"] } }
     puts "Config OK: #{config_path}"
     puts "  admins:   #{config['admins'].join(', ').then { |s| s.empty? ? 'none' : s }}"
     puts "  accounts: #{accounts.names.size}"
-    config["networks"].each_with_index do |net, index|
-      registered = Gemdrop::Channels.new(store, network: net["id"]).names + (index.zero? ? legacy : [])
+    config["networks"].each do |net|
+      registered = Gemdrop::Channels.new(store, network: net["id"]).names
       puts "  network #{net['id']}:"
       puts "    server:   #{net['server']}:#{net['port']} (network name: #{net['network'] || 'not checked'})"
       puts "    nick:     #{net['nick']}  user: #{net['user']}  realname: #{net['realname']}"

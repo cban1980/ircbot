@@ -71,12 +71,6 @@ module Gemdrop
       from_file = File.exist?(path) ? YAML.safe_load_file(path) || {} : {}
       raise ConfigError, "#{path} must contain a mapping of settings" unless from_file.is_a?(Hash)
 
-      if from_file.key?("link_preview")
-        raise ConfigError, "link_preview: link previews are now the \"links\" plugin. Install it " \
-                           "(gemdrop-docker plugin install contrib/plugins/links.rb) and move the settings " \
-                           "to plugins: links: (channels becomes only_channels; see docs/links.md)"
-      end
-      move_ctcp_section!(from_file)
       unknown = from_file.keys - DEFAULTS.keys - ["networks"]
       raise ConfigError, "Unknown setting(s) in #{path}: #{unknown.join(', ')}" if unknown.any?
 
@@ -145,22 +139,6 @@ module Gemdrop
           [name, view]
         end)
       end
-    end
-
-    # CTCP answers are the ctcp plugin now: an old top-level "ctcp:"
-    # section (enabled, version) becomes that plugin's settings.
-    def move_ctcp_section!(from_file)
-      return unless from_file.key?("ctcp")
-
-      old = from_file.delete("ctcp") || {}
-      raise ConfigError, "ctcp must be a mapping" unless old.is_a?(Hash)
-
-      plugins = (from_file["plugins"] ||= {})
-      raise ConfigError, "plugins must be a mapping of plugin name to settings" unless plugins.is_a?(Hash)
-
-      settings = (plugins["ctcp"] ||= {})
-      settings["version"] ||= old["version"].to_s if old.key?("version")
-      settings["enabled"] = false if old["enabled"] == false && !settings.key?("enabled")
     end
 
     # One network's flat config from a config loaded with load: the network

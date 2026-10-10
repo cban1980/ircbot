@@ -120,11 +120,4 @@ class ChannelPluginsTest < Minitest::Test
     assert_match(/unknown CTCP DCC/, manager.status["ctcp"]["error"])
   end
 
-  def test_old_ctcp_section_becomes_plugin_settings
-    path = File.join(@tmpdir, "old.yml")
-    File.write(path, "server: irc.example.net\nctcp:\n  enabled: false\n  version: Old\n", perm: 0o600)
-    config = Gemdrop::Config.load(path)
-    refute config.key?("ctcp")
-    assert_equal({ "enabled" => false, "version" => "Old" }, config["plugins"]["ctcp"].slice("enabled", "version"))
-  end
 end

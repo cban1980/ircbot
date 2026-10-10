@@ -108,17 +108,6 @@ class NetworksTest < Minitest::Test
     assert_equal [%w[EFnet #same]], Gemdrop::Channels.owned_anywhere(@store, "alice")
   end
 
-  def test_old_channels_move_to_the_first_network
-    @store.transaction do |data|
-      data["channels"] = { "#old" => { "name" => "#old", "owner" => "alice", "access" => {} } }
-    end
-    supervisor
-
-    refute(@store.read { |data| data.key?("channels") })
-    assert Gemdrop::Channels.new(@store, network: "IRCnet").registered?("#old")
-    refute Gemdrop::Channels.new(@store, network: "EFnet").registered?("#old")
-  end
-
   # --- supervisor ------------------------------------------------------------
 
   def test_each_network_joins_its_own_channels

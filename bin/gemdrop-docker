@@ -19,8 +19,6 @@ DIR=${GEMDROP_DIR:-$REPO/instance}
 NAME=${GEMDROP_NAME:-gemdrop}
 IMAGE=${GEMDROP_IMAGE:-gemdrop:latest}
 BRANCH=${GEMDROP_BRANCH:-main}
-# The container's name before the bot was called Gemdrop.
-LEGACY_NAME=rubicon
 
 usage() {
   cat <<EOF
@@ -171,22 +169,6 @@ is_running() { [ "$(container_state)" = "running" ]; }
 
 require_running() {
   is_running || die "$NAME is not running (start it with: $PROG start)"
-}
-
-# The container from before the rename ("rubicon"), if it runs this
-# instance. Starting Gemdrop replaces it, so two bots never share a nick.
-legacy_container() {
-  [ "$NAME" != "$LEGACY_NAME" ] || return 1
-  local dir
-  dir=$(docker container inspect --format '{{index .Config.Labels "rubicon.instance"}}' "$LEGACY_NAME" 2>/dev/null) || return 1
-  [ "$dir" = "$DIR" ]
-}
-
-retire_legacy_container() {
-  legacy_container || return 0
-  info "Replacing the old \"$LEGACY_NAME\" container (the bot is called Gemdrop now)"
-  docker stop --time 15 "$LEGACY_NAME" >/dev/null 2>&1 || true
-  docker rm "$LEGACY_NAME" >/dev/null 2>&1 || true
 }
 
 # --- the keeper ---------------------------------------------------------------------
@@ -378,7 +360,6 @@ cmd_start() {
   esac
   cmd_check >/dev/null || die "config check failed; fix it first (details: $PROG check)"
 
-  retire_legacy_container
   start_keeper
   base_run_opts
   run_opts+=(
@@ -733,7 +714,7 @@ cmd_update() {
     exec "$REPO/bin/$PROG" --dir "$DIR" --name "$NAME" --image "$IMAGE" "${again[@]}"
   fi
   cmd_build
-  if $restart && { is_running || legacy_container; }; then
+  if $restart && is_running; then
     cmd_restart
   fi
 }

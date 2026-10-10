@@ -45,19 +45,6 @@ module Gemdrop
 
     def self.network_key(network) = network.to_s.downcase
 
-    # Moves channels from the single-network data layout (a top-level
-    # "channels" section) to the given network. Returns how many moved.
-    def self.adopt_legacy!(store, network)
-      return 0 unless store.read { |data| data.key?("channels") }
-
-      store.transaction do |data|
-        legacy = data.delete("channels") || {}
-        section = network_section(data, network)
-        section["channels"] = legacy.merge(section["channels"])
-        legacy.size
-      end
-    end
-
     # [[network, channel], ...] owned by the account, on every network.
     def self.owned_anywhere(store, account)
       store.read do |data|

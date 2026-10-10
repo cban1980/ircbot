@@ -276,10 +276,9 @@ class PluginApiTest < Minitest::Test
 
   # --- CTCP ------------------------------------------------------------------------
 
-  # The ctcp plugin, set up through an old top-level "ctcp:" section.
   def test_core_ctcp_answers
     install_plugins(@plugins_dir, "ctcp")
-    start(%(ctcp:\n  version: "TestBot 1.0"\n))
+    start(%(plugins:\n  ctcp:\n    version: "TestBot 1.0"\n))
 
     say("alice", "\x01VERSION\x01")
     say("alice", "\x01PING 12345\x01")
@@ -297,7 +296,7 @@ class PluginApiTest < Minitest::Test
         ctcp_handler("VERSION") { |_event| "Custom version" }
       end
     RUBY
-    start(%(ctcp:\n  enabled: false\n))
+    start(%(plugins:\n  ctcp:\n    enabled: false\n))
 
     say("alice", "\x01FINGER\x01")
     say("alice", "\x01VERSION\x01")

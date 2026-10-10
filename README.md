@@ -273,8 +273,6 @@ plugins:
     answer: [VERSION, CLIENTINFO]       # which to answer (default: all four)
 ```
 
-An old top-level `ctcp:` section is still read and becomes these settings.
-
 ## Link previews
 
 When someone posts a link, the bot says what it is:

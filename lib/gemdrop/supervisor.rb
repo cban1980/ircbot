@@ -18,7 +18,6 @@ module Gemdrop
       @store = store || Store.new(config["data_file"])
       @store.on_error = ->(message) { @log.warn(message) }
       @hasher = hasher || Supervisor.hasher_for(config, @log)
-      adopt_legacy_channels
       @mutex = Mutex.new        # @bots and @threads; never held while calling into a bot
       @status_mutex = Mutex.new # @statuses and the status file; may take @mutex, never the reverse
       @bots = {}                # network key => Bot
@@ -88,13 +87,6 @@ module Gemdrop
     private
 
     def key(network) = Channels.network_key(network)
-
-    # Channels registered before networks existed belong to the first one.
-    def adopt_legacy_channels
-      network = @config["networks"].first["id"]
-      moved = Channels.adopt_legacy!(@store, network)
-      @log.info("Moved #{moved} registered channel(s) to network #{network}") if moved.positive?
-    end
 
     def build_bot(net)
       bot = nil
